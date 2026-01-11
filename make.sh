@@ -228,6 +228,17 @@ write_usb() {
 
   echo ""
   echo "Done! USB is ready to boot (ejected)."
+
+  # Audible notification
+  case "$(uname -s)" in
+    Darwin*)
+      afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
+      ;;
+    Linux*)
+      paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null &
+      ;;
+  esac
+  printf '\a'  # Terminal bell fallback
 }
 
 clean() {
