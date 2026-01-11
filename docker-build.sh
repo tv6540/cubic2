@@ -53,15 +53,53 @@ chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 
 # Disable gnome-initial-setup (Welcome to Ubuntu wizard)
 rm -f "$SQUASH_DIR/etc/xdg/autostart/gnome-initial-setup-first-login.desktop"
-mkdir -p "$SQUASH_DIR/etc/skel/.config"
-echo "yes" > "$SQUASH_DIR/etc/skel/.config/gnome-initial-setup-done"
+# For existing ubuntu user (not /etc/skel which only works for new users)
+mkdir -p "$SQUASH_DIR/home/ubuntu/.config"
+echo "yes" > "$SQUASH_DIR/home/ubuntu/.config/gnome-initial-setup-done"
+chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config"
 
-# VLC - disable metadata network access by default
-mkdir -p "$SQUASH_DIR/etc/skel/.config/vlc"
-cat > "$SQUASH_DIR/etc/skel/.config/vlc/vlcrc" << 'EOF'
+# VLC - disable metadata popup AND network access
+# Ref: https://wiki.videolan.org/VLC_HowTo/Disable_%22Privacy_Network_Policies%22_(Qt4)/
+# Ref: https://forums.whonix.org/t/disable-vlc-metadata-collection-by-default/18674
+mkdir -p "$SQUASH_DIR/home/ubuntu/.config/vlc"
+cat > "$SQUASH_DIR/home/ubuntu/.config/vlc/vlcrc" << 'EOF'
 [qt]
+qt-privacy-ask=0
 metadata-network-access=0
 EOF
+chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config/vlc"
+
+# Pre-configure GNOME settings via dconf database (gsettings won't work at runtime)
+# Ref: https://help.gnome.org/system-admin-guide/dconf-keyfiles.html
+# Ref: https://manpages.ubuntu.com/manpages/focal/man1/dconf.1.html
+# dconf compile expects a DIRECTORY of keyfiles, not a single file
+mkdir -p "$SQUASH_DIR/home/ubuntu/.config/dconf"
+mkdir -p /tmp/dconf-keyfiles.d
+cat > /tmp/dconf-keyfiles.d/00-settings << 'EOF'
+[org/gnome/shell]
+favorite-apps=['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']
+
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+gtk-theme='Yaru-dark'
+
+[org/gnome/desktop/screensaver]
+lock-enabled=true
+lock-delay=uint32 0
+
+[org/gnome/desktop/session]
+idle-delay=uint32 300
+
+[org/gnome/desktop/remote-desktop/rdp]
+enable=false
+
+[org/gnome/desktop/remote-desktop/vnc]
+enable=false
+EOF
+# Compile dconf database from keyfile directory
+dconf compile "$SQUASH_DIR/home/ubuntu/.config/dconf/user" /tmp/dconf-keyfiles.d
+chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config/dconf"
+rm -rf /tmp/dconf-keyfiles.d
 
 # Note: Package modification (removing ubiquity, installing git) is skipped
 # because Docker containers typically don't have network access for apt.

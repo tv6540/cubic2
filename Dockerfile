@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     syslinux-utils \
     grub-pc-bin \
     grub-efi-amd64-bin \
+    dconf-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

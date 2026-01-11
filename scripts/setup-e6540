@@ -72,11 +72,8 @@ echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
 sudo chmod +x /usr/bin/x
 
-echo -e "\n>>>> Setting dock favorites"
-gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']"
-
-echo -e "\n>>>> Enabling dark mode"
-gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+# Note: Dock favorites, dark mode, screen lock, and remote desktop settings
+# are pre-configured in the ISO via dconf database (docker-build.sh)
 
 echo -e "\n>>>> Hardening security"
 # Enable firewall - deny all incoming, allow outgoing
@@ -91,15 +88,6 @@ sudo systemctl stop ssh 2>/dev/null || true
 # Disable Bluetooth (attack surface)
 sudo systemctl disable bluetooth 2>/dev/null || true
 sudo systemctl stop bluetooth 2>/dev/null || true
-
-# Auto-lock screen after 5 minutes of inactivity
-gsettings set org.gnome.desktop.screensaver lock-enabled true
-gsettings set org.gnome.desktop.screensaver lock-delay 0
-gsettings set org.gnome.desktop.session idle-delay 300
-
-# Disable remote desktop
-gsettings set org.gnome.desktop.remote-desktop.rdp enable false 2>/dev/null || true
-gsettings set org.gnome.desktop.remote-desktop.vnc enable false 2>/dev/null || true
 
 # Remount USB as read-only to prevent malware persistence
 USB_DEVICE=$(mount | grep /cdrom | awk '{print $1}')
@@ -120,4 +108,11 @@ echo -e "    Log: ~/setup.log"
 echo "=== Setup finished at $(date) ==="
 
 echo -e "\n>>>> Launching Chrome..."
-google-chrome-stable --no-sandbox --start-fullscreen "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" &
+sleep 2
+if command -v google-chrome-stable &> /dev/null; then
+  nohup google-chrome-stable --no-sandbox --start-fullscreen "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" >/dev/null 2>&1 &
+  disown
+  echo "Chrome launched"
+else
+  echo "ERROR: Chrome not found!"
+fi
