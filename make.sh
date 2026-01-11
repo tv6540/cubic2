@@ -83,8 +83,9 @@ build_iso() {
   echo "Creating customized ISO..."
   mkdir -p "$WORK_DIR"
 
-  # Copy pre-setup files to work directory
+  # Copy pre-setup files and wallpapers to work directory
   cp -r "$SCRIPT_DIR/pre-setup" "$WORK_DIR/"
+  cp -r "$SCRIPT_DIR/wallpaper" "$WORK_DIR/"
 
   # Run Docker container to modify ISO
   docker run --rm --privileged --platform linux/amd64 \

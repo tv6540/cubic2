@@ -1,11 +1,9 @@
 #!/bin/bash
 set -e
 
-# Kill and remove gnome-initial-setup immediately (layered squashfs means build-time removal doesn't work)
-echo -e "\n>>>> Killing gnome-initial-setup"
+# Kill gnome-initial-setup if somehow still running (should be disabled at build time)
+echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
 pkill -f gnome-initial-setup 2>/dev/null || true
-sudo rm -f /etc/xdg/autostart/gnome-initial-setup-first-login.desktop 2>/dev/null || true
-sudo apt-get remove -y --purge gnome-initial-setup 2>/dev/null || true
 
 echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
 xrandr --output HDMI-1 --primary --mode 1600x900 || echo "Warning: HDMI-1 config failed, skipping"
@@ -17,12 +15,16 @@ xrandr --output eDP-1 --off || echo "Warning: eDP-1 disable failed, skipping"
 # Video players auto-inhibit screensaver during playback
 
 echo -e "\n>>>> Setting random wallpaper"
+shopt -s nullglob
 WALLPAPERS=(/usr/share/backgrounds/custom/wp-*.jpg)
+shopt -u nullglob
 if [ ${#WALLPAPERS[@]} -gt 0 ]; then
   RANDOM_WP="${WALLPAPERS[RANDOM % ${#WALLPAPERS[@]}]}"
   gsettings set org.gnome.desktop.background picture-uri "file://$RANDOM_WP"
   gsettings set org.gnome.desktop.background picture-uri-dark "file://$RANDOM_WP"
   echo "Applied wallpaper: $RANDOM_WP"
+else
+  echo "Warning: No wallpapers found in /usr/share/backgrounds/custom/"
 fi
 
 echo -e "\n>>>> Ignoring lid switch"
@@ -45,8 +47,8 @@ wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.de
 sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
 rm -f google-chrome-stable_current_amd64.deb
 
-# Fix Chrome sandbox issue for live USB
-sudo sed -i 's|Exec=/usr/bin/google-chrome-stable|Exec=/usr/bin/google-chrome-stable --no-sandbox|g' /usr/share/applications/google-chrome.desktop
+# Chrome sandbox works out of the box when installed via dpkg
+# No modification needed - sandbox is properly configured
 
 install_chrome_extension() {
   local ext_id="$1"
@@ -113,7 +115,6 @@ if command -v google-chrome-stable &> /dev/null; then
   # --no-default-browser-check: skip default browser prompt
   # --disable-session-crashed-bubble: no crash recovery prompt
   setsid google-chrome-stable \
-    --no-sandbox \
     --no-first-run \
     --no-default-browser-check \
     --disable-session-crashed-bubble \

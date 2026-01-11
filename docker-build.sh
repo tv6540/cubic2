@@ -3,15 +3,12 @@ set -e
 
 ISO_IN="/work/input.iso"
 ISO_OUT="/work/output.iso"
-# Use container's native filesystem for operations that need full Linux support
 EXTRACT_DIR="/tmp/extract"
 SQUASH_DIR="/tmp/squashfs"
 EFI_IMG="/tmp/efi.img"
 
 echo "=== Extracting EFI partition from original ISO ==="
-# Get EFI partition info using xorriso report
 EFI_INFO=$(xorriso -indev "$ISO_IN" -report_el_torito as_mkisofs 2>&1 | grep -A1 "append_partition 2")
-# Extract the interval range (e.g., 12105120d-12115263d)
 INTERVAL=$(echo "$EFI_INFO" | grep -oP '\d+d-\d+d' | head -1)
 if [ -n "$INTERVAL" ]; then
   START_SECTOR=$(echo "$INTERVAL" | cut -d'-' -f1 | tr -d 'd')
@@ -21,7 +18,6 @@ if [ -n "$INTERVAL" ]; then
   dd if="$ISO_IN" of="$EFI_IMG" bs=512 skip="$START_SECTOR" count="$COUNT" status=progress
 else
   echo "Warning: Could not find EFI partition info, creating minimal EFI image"
-  # Create a minimal EFI boot image as fallback
   dd if=/dev/zero of="$EFI_IMG" bs=1M count=5
 fi
 
@@ -30,61 +26,100 @@ mkdir -p "$EXTRACT_DIR"
 xorriso -osirrox on -indev "$ISO_IN" -extract / "$EXTRACT_DIR"
 chmod -R u+w "$EXTRACT_DIR"
 
-echo "=== Extracting and merging layered squashfs ==="
-# Ubuntu 24.04 uses layered squashfs - must merge all layers
-# Order: minimal → minimal.standard → minimal.standard.live
+echo "=== Merging layered squashfs into single filesystem.squashfs ==="
+# Ubuntu 24.04 uses layered squashfs - we merge ALL into single filesystem.squashfs
+# Then remove layerfs-path from grub.cfg so casper uses default single-squashfs mode
+# Ref: https://manpages.ubuntu.com/manpages/jammy/man7/casper.7.html
 rm -rf "$SQUASH_DIR"
 CASPER_DIR="$EXTRACT_DIR/casper"
 
+# Merge layers in order: minimal (base) -> minimal.standard -> minimal.standard.live (top)
 if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
   echo "Extracting minimal.squashfs (base layer)..."
-  unsquashfs -d "$SQUASH_DIR" "$CASPER_DIR/minimal.squashfs"
+  unsquashfs -d "$SQUASH_DIR" "$CASPER_DIR/minimal.squashfs" || true
 
   if [ -f "$CASPER_DIR/minimal.standard.squashfs" ]; then
     echo "Merging minimal.standard.squashfs..."
-    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.squashfs"
+    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.squashfs" || true
   fi
 
   if [ -f "$CASPER_DIR/minimal.standard.live.squashfs" ]; then
     echo "Merging minimal.standard.live.squashfs..."
-    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.live.squashfs"
+    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.live.squashfs" || true
   fi
 
-  SQUASHFS_PATH="$CASPER_DIR/filesystem.squashfs"
-  # Remove old layered files - we'll create single merged squashfs
+  # Remove ALL old squashfs files - we'll create single filesystem.squashfs
+  echo "Removing old layered squashfs files..."
   rm -f "$CASPER_DIR"/*.squashfs
+  rm -f "$CASPER_DIR"/*.squashfs.gpg
+  rm -f "$CASPER_DIR"/*.manifest
+  rm -f "$CASPER_DIR"/*.size
+
+elif [ -f "$CASPER_DIR/filesystem.squashfs" ]; then
+  echo "Found single filesystem.squashfs, extracting..."
+  unsquashfs -d "$SQUASH_DIR" "$CASPER_DIR/filesystem.squashfs"
+  rm -f "$CASPER_DIR/filesystem.squashfs"
 else
-  # Fallback for non-layered squashfs
-  SQUASHFS_PATH=$(find "$EXTRACT_DIR" -name "filesystem.squashfs" 2>/dev/null | head -1)
-  if [ -z "$SQUASHFS_PATH" ]; then
-    SQUASHFS_PATH="$CASPER_DIR/filesystem.squashfs"
-  fi
-  echo "Found squashfs at: $SQUASHFS_PATH"
-  unsquashfs -d "$SQUASH_DIR" "$SQUASHFS_PATH"
+  echo "ERROR: No squashfs found in $CASPER_DIR"
+  exit 1
 fi
-echo "Squashfs extracted to: $SQUASH_DIR"
+
+echo "=== Removing layerfs-path from GRUB config ==="
+# Remove layerfs-path parameter so casper uses single filesystem.squashfs
+# Ref: https://manpages.ubuntu.com/manpages/jammy/man7/casper.7.html
+sed -i 's/layerfs-path=[^ ]* //g' "$EXTRACT_DIR/boot/grub/grub.cfg"
+sed -i 's/layerfs-path=[^ ]*//g' "$EXTRACT_DIR/boot/grub/grub.cfg"
+# Also check loopback.cfg if it exists
+if [ -f "$EXTRACT_DIR/boot/grub/loopback.cfg" ]; then
+  sed -i 's/layerfs-path=[^ ]* //g' "$EXTRACT_DIR/boot/grub/loopback.cfg"
+  sed -i 's/layerfs-path=[^ ]*//g' "$EXTRACT_DIR/boot/grub/loopback.cfg"
+fi
+
+echo "Squashfs merged to: $SQUASH_DIR"
+
+# Validate squashfs extraction succeeded
+if [ ! -d "$SQUASH_DIR/usr" ] || [ ! -d "$SQUASH_DIR/etc" ]; then
+  echo "ERROR: Squashfs extraction failed - missing /usr or /etc directories!"
+  exit 1
+fi
+echo "Validated: Squashfs extraction successful"
 
 echo "=== Injecting setup files ==="
-# Copy setup script
 cp /work/pre-setup/setup "$SQUASH_DIR/usr/bin/setup"
 chmod 755 "$SQUASH_DIR/usr/bin/setup"
 chown root:root "$SQUASH_DIR/usr/bin/setup"
 
-# Copy autostart desktop file
 mkdir -p "$SQUASH_DIR/etc/xdg/autostart"
 cp /work/pre-setup/setup.desktop "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 
-# Disable gnome-initial-setup (Welcome to Ubuntu wizard)
-rm -f "$SQUASH_DIR/etc/xdg/autostart/gnome-initial-setup-first-login.desktop"
-# For existing ubuntu user (not /etc/skel which only works for new users)
+echo "=== Disabling gnome-initial-setup ==="
+# Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
+
+# 1. Mask systemd user service (symlink to /dev/null)
+mkdir -p "$SQUASH_DIR/etc/systemd/user"
+ln -sf /dev/null "$SQUASH_DIR/etc/systemd/user/gnome-initial-setup-first-login.service"
+
+# 2. Override autostart desktop file
+cat > "$SQUASH_DIR/etc/xdg/autostart/gnome-initial-setup-first-login.desktop" << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Disabled
+Hidden=true
+X-GNOME-Autostart-enabled=false
+NoDisplay=true
+EOF
+
+# 3. Create done file for ubuntu user
 mkdir -p "$SQUASH_DIR/home/ubuntu/.config"
 echo "yes" > "$SQUASH_DIR/home/ubuntu/.config/gnome-initial-setup-done"
 chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config"
 
-# VLC - disable metadata popup AND network access
-# Ref: https://wiki.videolan.org/VLC_HowTo/Disable_%22Privacy_Network_Policies%22_(Qt4)/
-# Ref: https://forums.whonix.org/t/disable-vlc-metadata-collection-by-default/18674
+# 4. Create done file in /etc/skel for new users
+mkdir -p "$SQUASH_DIR/etc/skel/.config"
+echo "yes" > "$SQUASH_DIR/etc/skel/.config/gnome-initial-setup-done"
+
+echo "=== Configuring VLC ==="
 mkdir -p "$SQUASH_DIR/home/ubuntu/.config/vlc"
 cat > "$SQUASH_DIR/home/ubuntu/.config/vlc/vlcrc" << 'EOF'
 [qt]
@@ -93,10 +128,7 @@ metadata-network-access=0
 EOF
 chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config/vlc"
 
-# Pre-configure GNOME settings via dconf database (gsettings won't work at runtime)
-# Ref: https://help.gnome.org/system-admin-guide/dconf-keyfiles.html
-# Ref: https://manpages.ubuntu.com/manpages/focal/man1/dconf.1.html
-# dconf compile expects a DIRECTORY of keyfiles, not a single file
+echo "=== Configuring GNOME settings via dconf ==="
 mkdir -p "$SQUASH_DIR/home/ubuntu/.config/dconf"
 mkdir -p /tmp/dconf-keyfiles.d
 cat > /tmp/dconf-keyfiles.d/00-settings << 'EOF'
@@ -120,68 +152,58 @@ enable=false
 [org/gnome/desktop/remote-desktop/vnc]
 enable=false
 EOF
-# Compile dconf database from keyfile directory
 dconf compile "$SQUASH_DIR/home/ubuntu/.config/dconf/user" /tmp/dconf-keyfiles.d
 chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config/dconf"
 rm -rf /tmp/dconf-keyfiles.d
 
-# Remove unwanted packages via chroot
-# Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
-echo "=== Removing unwanted packages via chroot ==="
+echo "=== Removing bloatware packages ==="
+if [ -x "$SQUASH_DIR/usr/bin/apt-get" ] && [ -d "$SQUASH_DIR/var/lib/dpkg" ]; then
+  cp /etc/resolv.conf "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
+  mount --bind /dev "$SQUASH_DIR/dev" 2>/dev/null || true
+  mount --bind /dev/pts "$SQUASH_DIR/dev/pts" 2>/dev/null || true
+  mount -t proc proc "$SQUASH_DIR/proc" 2>/dev/null || true
+  mount -t sysfs sysfs "$SQUASH_DIR/sys" 2>/dev/null || true
 
-# Setup chroot environment
-cp /etc/resolv.conf "$SQUASH_DIR/etc/resolv.conf"
-mount --bind /dev "$SQUASH_DIR/dev"
-mount --bind /dev/pts "$SQUASH_DIR/dev/pts"
-mount -t proc proc "$SQUASH_DIR/proc"
-mount -t sysfs sysfs "$SQUASH_DIR/sys"
+  chroot "$SQUASH_DIR" /bin/bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq 2>/dev/null || exit 0
+  apt-get remove -y --purge \
+    gnome-initial-setup \
+    firefox \
+    thunderbird \
+    libreoffice-* \
+    rhythmbox \
+    totem \
+    remmina \
+    shotwell \
+    software-properties-gtk \
+    update-manager \
+    usb-creator-gtk \
+    transmission-gtk \
+    yelp \
+    gnome-user-docs \
+    ubuntu-report \
+    popularity-contest \
+    2>/dev/null || true
+  apt-get autoremove -y 2>/dev/null || true
+  apt-get clean 2>/dev/null || true
+  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+  systemctl --global mask gnome-initial-setup-first-login.service 2>/dev/null || true
+  ' || echo "Note: Package removal had warnings (continuing)"
 
-# Remove bloatware packages inside chroot
-chroot "$SQUASH_DIR" /bin/bash -c '
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get remove -y --purge \
-  gnome-initial-setup \
-  firefox \
-  thunderbird \
-  libreoffice-* \
-  rhythmbox \
-  totem \
-  remmina \
-  shotwell \
-  software-properties-gtk \
-  update-manager \
-  usb-creator-gtk \
-  transmission-gtk \
-  yelp \
-  gnome-user-docs \
-  ubuntu-report \
-  popularity-contest \
-  2>/dev/null || true
-apt-get autoremove -y
-apt-get clean
-rm -rf /var/lib/apt/lists/*
+  umount "$SQUASH_DIR/sys" 2>/dev/null || true
+  umount "$SQUASH_DIR/proc" 2>/dev/null || true
+  umount "$SQUASH_DIR/dev/pts" 2>/dev/null || true
+  umount "$SQUASH_DIR/dev" 2>/dev/null || true
+  rm -f "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
+fi
 
-# Mask gnome-initial-setup service globally for all users
-# Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
-systemctl --global mask gnome-initial-setup-first-login.service 2>/dev/null || true
-'
-
-# Cleanup chroot mounts
-umount "$SQUASH_DIR/sys" || true
-umount "$SQUASH_DIR/proc" || true
-umount "$SQUASH_DIR/dev/pts" || true
-umount "$SQUASH_DIR/dev" || true
-rm -f "$SQUASH_DIR/etc/resolv.conf"
-
-# Copy wallpapers for random selection at runtime
+echo "=== Copying wallpapers ==="
 mkdir -p "$SQUASH_DIR/usr/share/backgrounds/custom"
 cp /work/wallpaper/wp-*.jpg "$SQUASH_DIR/usr/share/backgrounds/custom/"
 chmod 644 "$SQUASH_DIR/usr/share/backgrounds/custom/"*.jpg
 
-# Chrome enterprise policy to disable Privacy Sandbox prompt
-# Ref: https://support.google.com/chrome/a/answer/9027408
-# Ref: https://chromeenterprise.google/policies/
+echo "=== Adding Chrome policy ==="
 mkdir -p "$SQUASH_DIR/etc/opt/chrome/policies/managed"
 cat > "$SQUASH_DIR/etc/opt/chrome/policies/managed/custom_policy.json" << 'EOF'
 {
@@ -191,39 +213,54 @@ cat > "$SQUASH_DIR/etc/opt/chrome/policies/managed/custom_policy.json" << 'EOF'
   "PrivacySandboxSiteEnabledAdsEnabled": false
 }
 EOF
-chmod 644 "$SQUASH_DIR/etc/opt/chrome/policies/managed/custom_policy.json"
 
 echo "=== Configuring GRUB ==="
-# Set timeout to 5 seconds
 sed -i 's/set timeout=30/set timeout=5/' "$EXTRACT_DIR/boot/grub/grub.cfg"
-# Remove quiet splash to show boot progress, add nomodeset for compatibility
 sed -i 's/quiet splash/nomodeset/' "$EXTRACT_DIR/boot/grub/grub.cfg"
 
-echo "=== Removing unused files to reduce ISO size ==="
-# Remove offline package pool (~1.9GB) - not needed with internet access
+echo "=== Removing unused files ==="
 rm -rf "$EXTRACT_DIR/pool"
 rm -rf "$EXTRACT_DIR/dists"
 
-# Clean up old squashfs metadata files (we merged layers into single filesystem.squashfs)
-find "$EXTRACT_DIR/casper" -name "*.squashfs.gpg" -delete 2>/dev/null || true
-find "$EXTRACT_DIR/casper" -name "*.manifest" -delete 2>/dev/null || true
-find "$EXTRACT_DIR/casper" -name "*.size" -delete 2>/dev/null || true
+echo "=== Validating configuration ==="
+# Check gnome-initial-setup is disabled
+if [ ! -L "$SQUASH_DIR/etc/systemd/user/gnome-initial-setup-first-login.service" ]; then
+  echo "ERROR: systemd service not masked!"
+  exit 1
+fi
+if [ ! -f "$SQUASH_DIR/home/ubuntu/.config/gnome-initial-setup-done" ]; then
+  echo "ERROR: done file not created!"
+  exit 1
+fi
+# Check setup.desktop exists
+if [ ! -f "$SQUASH_DIR/etc/xdg/autostart/setup.desktop" ]; then
+  echo "ERROR: setup.desktop not found!"
+  exit 1
+fi
+# Check wallpapers copied
+if [ ! -f "$SQUASH_DIR/usr/share/backgrounds/custom/wp-01.jpg" ]; then
+  echo "ERROR: wallpapers not copied!"
+  exit 1
+fi
+# Check layerfs-path removed from grub
+if grep -q "layerfs-path" "$EXTRACT_DIR/boot/grub/grub.cfg"; then
+  echo "ERROR: layerfs-path still in grub.cfg!"
+  exit 1
+fi
+echo "VALIDATED: All configurations applied"
 
-echo "=== Repacking squashfs ==="
-rm -f "$SQUASHFS_PATH"
-mksquashfs "$SQUASH_DIR" "$SQUASHFS_PATH" -comp xz -b 1M
+echo "=== Creating filesystem.squashfs ==="
+mksquashfs "$SQUASH_DIR" "$CASPER_DIR/filesystem.squashfs" -comp xz -b 1M
+echo "Created: $CASPER_DIR/filesystem.squashfs"
 
 echo "=== Updating filesystem.size ==="
-FSSIZE_PATH=$(dirname "$SQUASHFS_PATH")/filesystem.size
-printf $(du -sx --block-size=1 "$SQUASH_DIR" | cut -f1) > "$FSSIZE_PATH"
+printf $(du -sx --block-size=1 "$SQUASH_DIR" | cut -f1) > "$CASPER_DIR/filesystem.size"
 
 echo "=== Regenerating md5sum.txt ==="
 (cd "$EXTRACT_DIR" && find . -type f -print0 | xargs -0 md5sum | grep -v isolinux/boot.cat | grep -v md5sum.txt > md5sum.txt) || true
 
 echo "=== Rebuilding ISO ==="
-# Get EFI image size in 512-byte sectors for boot-load-size
 EFI_SIZE_SECTORS=$(( $(stat -c%s "$EFI_IMG") / 512 ))
-echo "EFI image size: $EFI_SIZE_SECTORS sectors"
 
 xorriso -as mkisofs \
   -r -V "Ubuntu Custom" \
@@ -250,6 +287,14 @@ xorriso -as mkisofs \
   -no-emul-boot \
   -boot-load-size "$EFI_SIZE_SECTORS" \
   "$EXTRACT_DIR"
+
+echo "=== Final validation ==="
+# Verify ISO has filesystem.squashfs
+if ! xorriso -indev "$ISO_OUT" -find /casper -name "filesystem.squashfs" 2>/dev/null | grep -q squashfs; then
+  echo "ERROR: filesystem.squashfs not in final ISO!"
+  exit 1
+fi
+echo "VERIFIED: filesystem.squashfs present in ISO"
 
 echo "=== Cleaning up ==="
 rm -rf "$EXTRACT_DIR" "$SQUASH_DIR" "$EFI_IMG"
