@@ -35,9 +35,16 @@ if ! grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf; then
 fi
 
 echo -e "\n>>>> Setting HDMI audio as default"
-HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
-if [ -n "$HDMI_SINK" ]; then
-  pactl set-default-sink "$HDMI_SINK"
+if command -v pactl &>/dev/null; then
+  HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
+  if [ -n "$HDMI_SINK" ]; then
+    pactl set-default-sink "$HDMI_SINK"
+    echo "Set default sink to: $HDMI_SINK"
+  else
+    echo "Warning: No HDMI sink found"
+  fi
+else
+  echo "Warning: pactl not available, skipping HDMI audio setup"
 fi
 
 echo -e "\n>>>> Setting timezone to Pacific"
@@ -116,10 +123,12 @@ if command -v google-chrome-stable &> /dev/null; then
   # --no-first-run: skip first run experience
   # --no-default-browser-check: skip default browser prompt
   # --disable-session-crashed-bubble: no crash recovery prompt
+  # --no-sandbox: required for live USB environment (overlayfs causes sandbox failures)
   setsid google-chrome-stable \
     --no-first-run \
     --no-default-browser-check \
     --disable-session-crashed-bubble \
+    --no-sandbox \
     --start-fullscreen \
     "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" \
     </dev/null >/dev/null 2>&1 &

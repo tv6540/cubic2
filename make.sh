@@ -198,9 +198,10 @@ write_usb() {
   # Detect OS and use appropriate command
   case "$(uname -s)" in
     Darwin*)
-      # macOS
+      # macOS - use raw device (rdisk) for ~10x faster writes
       diskutil unmountDisk "$device" || true
-      sudo dd if="$iso_path" of="$device" bs=4m status=progress
+      RAW_DEVICE=$(echo "$device" | sed 's|/dev/disk|/dev/rdisk|')
+      sudo dd if="$iso_path" of="$RAW_DEVICE" bs=4m status=progress
       ;;
     Linux*)
       # Linux

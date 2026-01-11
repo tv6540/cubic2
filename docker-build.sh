@@ -45,7 +45,8 @@ if [ -f "$CASPER_DIR/minimal.standard.live.squashfs" ]; then
       echo "  === Checking $layer.squashfs ==="
 
       # Use unsquashfs -l to LIST files without extracting (FAST)
-      FOUND_FILES=$(unsquashfs -l "$LAYER_FILE" 2>/dev/null | grep -E "gnome-initial-setup|desktop-provision" | grep -v "ibus-mozc" || true)
+      # Search for gnome-initial-setup, gnome-tour, desktop-provision, ubuntu-desktop-bootstrap
+      FOUND_FILES=$(unsquashfs -l "$LAYER_FILE" 2>/dev/null | grep -E "gnome-initial-setup|desktop-provision|gnome-tour|org.gnome.Tour|ubuntu-desktop-bootstrap|desktop-bootstrap" | grep -v "ibus-mozc" | grep -v "icons" || true)
 
       if [ -n "$FOUND_FILES" ]; then
         echo "  >>> FOUND gnome-initial-setup in $layer.squashfs:"
@@ -57,12 +58,18 @@ if [ -f "$CASPER_DIR/minimal.standard.live.squashfs" ]; then
         rm -rf "$TEMP_LAYER"
         unsquashfs -d "$TEMP_LAYER" "$LAYER_FILE"
 
-        # Remove gnome-initial-setup files
+        # Remove gnome-initial-setup, gnome-tour, desktop-provision, ubuntu-desktop-bootstrap files
         echo "  Removing files..."
         find "$TEMP_LAYER" -type f -name "*gnome-initial-setup*" ! -name "*ibus-mozc*" -exec rm -rfv {} \; 2>/dev/null || true
         find "$TEMP_LAYER" -type f -name "*desktop-provision*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type f -name "*gnome-tour*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type f -name "*org.gnome.Tour*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type f -name "*ubuntu-desktop-bootstrap*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type f -name "*desktop-bootstrap*" -exec rm -rfv {} \; 2>/dev/null || true
         find "$TEMP_LAYER" -type d -name "*gnome-initial-setup*" -exec rm -rfv {} \; 2>/dev/null || true
         find "$TEMP_LAYER" -type d -name "*desktop-provision*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type d -name "*gnome-tour*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type d -name "*ubuntu-desktop-bootstrap*" -exec rm -rfv {} \; 2>/dev/null || true
 
         echo "  CONFIRMED: gnome-initial-setup removed from ${layer}.squashfs"
 
@@ -106,17 +113,31 @@ echo "=== Removing welcome/setup programs from top layer ==="
 find "$SQUASH_DIR" -type f \( \
   -name "*initial-setup*" -o \
   -name "*gnome-tour*" -o \
+  -name "*org.gnome.Tour*" -o \
   -name "*ubuntu-welcome*" -o \
   -name "*desktop-provision*" -o \
+  -name "*desktop-bootstrap*" -o \
   -name "*first-run*" \
-\) -exec rm -rfv {} \; 2>/dev/null || true
+\) ! -name "*ibus-mozc*" -exec rm -rfv {} \; 2>/dev/null || true
 
 find "$SQUASH_DIR" -type d \( \
   -name "*initial-setup*" -o \
   -name "*gnome-tour*" -o \
   -name "*ubuntu-welcome*" -o \
-  -name "*desktop-provision*" \
+  -name "*desktop-provision*" -o \
+  -name "*desktop-bootstrap*" \
 \) -exec rm -rfv {} \; 2>/dev/null || true
+
+# Also hide the ubuntu-desktop-bootstrap snap autostart
+cat > "$SQUASH_DIR/etc/xdg/autostart/ubuntu-desktop-bootstrap.desktop" << 'EOF' 2>/dev/null || true
+[Desktop Entry]
+Type=Application
+Name=Disabled
+Hidden=true
+X-GNOME-Autostart-enabled=false
+NoDisplay=true
+EOF
+
 echo "welcome/setup removal from top layer complete"
 
 echo "=== Injecting setup files ==="
@@ -131,11 +152,13 @@ chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 echo "=== Disabling gnome-initial-setup (belt and suspenders) ==="
 # Even though we removed the binary, add config overrides in case package gets reinstalled
 
-# 1. GDM config
+# 1. GDM config - disable initial setup AND enable auto-login
 mkdir -p "$SQUASH_DIR/etc/gdm3"
 cat > "$SQUASH_DIR/etc/gdm3/custom.conf" << 'EOF'
 [daemon]
 InitialSetupEnable=false
+AutomaticLoginEnable=true
+AutomaticLogin=ubuntu
 EOF
 
 # 2. Mask systemd user service
@@ -151,6 +174,19 @@ Hidden=true
 X-GNOME-Autostart-enabled=false
 NoDisplay=true
 EOF
+
+# 4. Disable gnome-tour (the "Welcome to Ubuntu" tour app)
+cat > "$SQUASH_DIR/etc/xdg/autostart/org.gnome.Tour.desktop" << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Disabled
+Hidden=true
+X-GNOME-Autostart-enabled=false
+NoDisplay=true
+EOF
+
+# Also mask gnome-tour via systemd if it exists
+ln -sf /dev/null "$SQUASH_DIR/etc/systemd/user/org.gnome.Tour.service" 2>/dev/null || true
 
 # 4. Create done file for ubuntu user
 mkdir -p "$SQUASH_DIR/home/ubuntu/.config"
