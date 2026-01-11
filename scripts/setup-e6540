@@ -51,14 +51,15 @@ echo -e "\n>>>> Setting timezone to Pacific"
 sudo timedatectl set-timezone America/Los_Angeles
 
 echo -e "\n>>>> Applying security updates and Chrome dependencies"
-# Skip locale generation for faster installs (safe for single-language live USB)
-export LC_ALL=C.UTF-8
-export LANG=C.UTF-8
-sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get update -qq
-# Security updates only (fast)
-sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive unattended-upgrade -v 2>/dev/null || true
-# Chrome required packages (from crash report + GUI deps)
-sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --only-upgrade \
+# Disable locale generation (wastes 30+ seconds during package installs)
+sudo mv /usr/sbin/locale-gen /usr/sbin/locale-gen.bak 2>/dev/null || true
+sudo ln -sf /bin/true /usr/sbin/locale-gen
+sudo mv /usr/bin/localedef /usr/bin/localedef.bak 2>/dev/null || true
+sudo ln -sf /bin/true /usr/bin/localedef
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+# Chrome required packages (from crash report + GUI deps) - includes security libs
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --only-upgrade \
   dpkg gpgv libapparmor1 libblkid1 libmount1 \
   libpam-modules libpam-modules-bin libpango-1.0-0 libpangocairo-1.0-0 \
   libpng16-16t64 libsmartcols1 libsqlite3-0 libssl3t64 \
@@ -70,7 +71,7 @@ sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-i
 echo -e "\n>>>> Installing Google Chrome"
 cd /tmp
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -f -y
+sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y
 rm -f google-chrome-stable_current_amd64.deb
 
 # Chrome sandbox works out of the box when installed via dpkg
@@ -91,7 +92,12 @@ install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube™ Ads"
 
 echo -e "\n>>>> Installing VLC"
-sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc
+
+# Restore locale tools after all package installs
+sudo rm -f /usr/sbin/locale-gen /usr/bin/localedef
+sudo mv /usr/sbin/locale-gen.bak /usr/sbin/locale-gen 2>/dev/null || true
+sudo mv /usr/bin/localedef.bak /usr/bin/localedef 2>/dev/null || true
 
 echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
@@ -135,22 +141,21 @@ echo "=== Setup finished at $(date) ==="
 echo -e "\n>>>> Launching Chrome..."
 sleep 3
 if command -v google-chrome-stable &> /dev/null; then
-  # Use setsid to fully detach from terminal session
-  # Ref: https://www.baeldung.com/linux/detach-process-from-terminal
-  # --no-first-run: skip first run experience
-  # --no-default-browser-check: skip default browser prompt
-  # --disable-session-crashed-bubble: no crash recovery prompt
-  # --no-sandbox: required for live USB environment (overlayfs causes sandbox failures)
-  # Ref: https://old.liewcf.com/google-account-chooser-8738/
-  setsid google-chrome-stable \
+  # Launch Chrome fully detached using systemd-run (survives terminal close)
+  # Ref: https://man7.org/linux/man-pages/man1/systemd-run.1.html
+  # Ref: https://words.yuvi.in/post/systemd-gui-applications/
+  # GUI apps need DISPLAY and DBUS_SESSION_BUS_ADDRESS env vars
+  systemd-run --user --no-block \
+    --setenv=DISPLAY="$DISPLAY" \
+    --setenv=DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+    google-chrome-stable \
     --no-first-run \
     --no-default-browser-check \
     --disable-session-crashed-bubble \
     --no-sandbox \
     --start-fullscreen \
-    "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" \
-    </dev/null >/dev/null 2>&1 &
-  echo "Chrome launched (PID: $!)"
+    "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/"
+  echo "Chrome launched via systemd"
 else
   echo "ERROR: Chrome not found!"
 fi
