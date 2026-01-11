@@ -51,16 +51,26 @@ echo -e "\n>>>> Setting timezone to Pacific"
 sudo timedatectl set-timezone America/Los_Angeles
 
 echo -e "\n>>>> Applying security updates and Chrome dependencies"
-sudo apt-get update -qq
+# Skip locale generation for faster installs (safe for single-language live USB)
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get update -qq
 # Security updates only (fast)
-sudo unattended-upgrade -v 2>/dev/null || true
-# Chrome dependencies - libc, gtk, nss, glib
-sudo apt-get install -y -qq --only-upgrade libc6 libgtk-3-0t64 libgtk-4-1 libglib2.0-0t64 libnss3 libnspr4 libatk1.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libasound2t64 2>/dev/null || true
+sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive unattended-upgrade -v 2>/dev/null || true
+# Chrome required packages (from crash report + GUI deps)
+sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --only-upgrade \
+  dpkg gpgv libapparmor1 libblkid1 libmount1 \
+  libpam-modules libpam-modules-bin libpango-1.0-0 libpangocairo-1.0-0 \
+  libpng16-16t64 libsmartcols1 libsqlite3-0 libssl3t64 \
+  libsystemd0 libudev1 libuuid1 libxml2 openssl uuid-runtime \
+  libc6 libgtk-3-0t64 libgtk-4-1 libglib2.0-0t64 libnss3 libnspr4 \
+  libatk1.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libasound2t64 \
+  2>/dev/null || true
 
 echo -e "\n>>>> Installing Google Chrome"
 cd /tmp
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -f -y
 rm -f google-chrome-stable_current_amd64.deb
 
 # Chrome sandbox works out of the box when installed via dpkg
@@ -81,7 +91,7 @@ install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube™ Ads"
 
 echo -e "\n>>>> Installing VLC"
-sudo apt install -y vlc
+sudo LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc
 
 echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
