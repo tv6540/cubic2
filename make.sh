@@ -96,8 +96,9 @@ build_iso() {
 
   if [ -f "$WORK_DIR/output.iso" ]; then
     mv "$WORK_DIR/output.iso" "$SCRIPT_DIR/$OUTPUT_ISO"
+    ISO_SIZE=$(du -h "$SCRIPT_DIR/$OUTPUT_ISO" | cut -f1)
     echo ""
-    echo "Success! Custom ISO created: $SCRIPT_DIR/$OUTPUT_ISO"
+    echo "Success! Custom ISO created: $SCRIPT_DIR/$OUTPUT_ISO ($ISO_SIZE)"
     echo ""
     echo "To write to USB:"
     echo "  $0 usb /dev/sdX"
