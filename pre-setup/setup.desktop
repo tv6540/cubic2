@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Initial Setup
-Exec=sh -c 'sleep 2 && gnome-terminal -- /usr/bin/setup'
+Exec=gnome-terminal -- /usr/bin/setup
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=1
+X-GNOME-Autostart-Delay=5

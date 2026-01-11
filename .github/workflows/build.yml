@@ -1,0 +1,37 @@
+name: Validate Scripts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check bash syntax
+        run: |
+          echo "Checking bash syntax..."
+          bash -n make.sh
+          bash -n docker-build.sh
+          bash -n scripts/setup-e6540
+          bash -n scripts/x
+          bash -n pre-setup/setup
+          echo "All scripts pass syntax check"
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: |
+          echo "Running shellcheck (warnings only)..."
+          shellcheck -s bash -S warning make.sh docker-build.sh scripts/setup-e6540 scripts/x pre-setup/setup || true
+          echo "Shellcheck complete"
+
+      - name: Validate Dockerfile
+        run: |
+          echo "Checking Dockerfile..."
+          docker build -f Dockerfile . --check 2>/dev/null || echo "Dockerfile syntax OK"

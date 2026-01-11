@@ -3,10 +3,15 @@ set -e
 
 REPO_URL="https://github.com/tv6540/cubic2.git"
 SETUP_DIR="/tmp/cubic2"
+LOG_FILE="$HOME/setup.log"
+
+# Log all output to file and terminal
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "=== Setup started at $(date) ==="
 
 check_online() {
   local retries=0
-  local max_retries=10
+  local max_retries=360
 
   while [ $retries -lt $max_retries ]; do
     if ping -c 1 github.com &> /dev/null; then
@@ -14,17 +19,32 @@ check_online() {
       return 0
     fi
     retries=$((retries + 1))
-    echo "Offline. Retry $retries/$max_retries"
+    echo "Waiting for network... ($retries/$max_retries)"
     sleep 5
   done
 
-  echo "Failed to connect after $max_retries attempts"
+  echo ""
+  echo "============================================"
+  echo "ERROR: No network after $max_retries attempts"
+  echo "============================================"
+  echo ""
+  echo "To recover:"
+  echo "  1. Connect to WiFi or plug in ethernet"
+  echo "  2. Run: setup"
+  echo ""
   exit 1
 }
 
 main() {
   echo "Checking internet connectivity..."
   check_online
+
+  # Ensure git is installed
+  if ! command -v git &> /dev/null; then
+    echo "Installing git..."
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq git
+  fi
 
   echo "Cloning setup repository..."
   rm -rf "$SETUP_DIR"
