@@ -13,7 +13,8 @@ print_usage() {
   echo "Usage: $0 [command]"
   echo ""
   echo "Commands:"
-  echo "  build     Build the customized ISO (default)"
+  echo "  all       Clean + Build + USB in one go (default)"
+  echo "  build     Build the customized ISO only"
   echo "  download  Download Ubuntu ISO only"
   echo "  clean     Remove work directory and Docker image"
   echo "  usb       Write ISO to USB (interactive device selection)"
@@ -22,9 +23,9 @@ print_usage() {
   echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.3)"
   echo ""
   echo "Examples:"
-  echo "  $0                    # Build ISO"
-  echo "  $0 build              # Build ISO"
-  echo "  $0 download           # Download Ubuntu ISO only"
+  echo "  $0                    # Clean, build, and write to USB"
+  echo "  $0 all                # Same as above"
+  echo "  $0 build              # Build ISO only"
   echo "  $0 usb                # Write to USB (shows device picker)"
   echo "  $0 usb /dev/disk4     # Write to specific device"
   echo "  UBUNTU_VERSION=24.04 $0 build  # Use specific version"
@@ -165,6 +166,7 @@ select_usb_device() {
 
 write_usb() {
   local device="$1"
+  local skip_confirm="$2"
   local iso_path="$SCRIPT_DIR/$OUTPUT_ISO"
 
   if [ ! -f "$iso_path" ]; then
@@ -179,12 +181,15 @@ write_usb() {
     device="$SELECTED_DEVICE"
   fi
 
-  echo ""
-  echo "WARNING: This will ERASE ALL DATA on $device"
-  read -p "Type 'yes' to confirm: " confirm
-  if [ "$confirm" != "yes" ]; then
-    echo "Aborted"
-    exit 1
+  # Skip confirmation if already done (e.g., from do_all)
+  if [ "$skip_confirm" != "yes" ]; then
+    echo ""
+    echo "WARNING: This will ERASE ALL DATA on $device"
+    read -p "Type 'yes' to confirm: " confirm
+    if [ "$confirm" != "yes" ]; then
+      echo "Aborted"
+      exit 1
+    fi
   fi
 
   echo ""
@@ -228,6 +233,7 @@ clean() {
   echo "Cleaning up build artifacts (preserving downloaded ISO)..."
   # Remove pre-setup copy but keep the downloaded ISO
   rm -rf "$WORK_DIR/pre-setup"
+  rm -rf "$WORK_DIR/wallpaper"
   rm -rf "$WORK_DIR/extract"
   rm -rf "$WORK_DIR/squashfs"
   rm -f "$WORK_DIR/output.iso"
@@ -236,8 +242,61 @@ clean() {
   echo "Clean complete (ISO preserved at $WORK_DIR/$ISO_NAME if present)"
 }
 
+do_all() {
+  # Get ALL prompts/checks out of the way FIRST
+  check_docker
+  sudo -v || { echo "Error: sudo authentication failed"; exit 1; }
+
+  # Keep sudo alive in background
+  (while true; do sudo -n true; sleep 50; done 2>/dev/null) &
+  SUDO_KEEPALIVE_PID=$!
+  trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null" EXIT
+
+  # Select USB device before long build
+  select_usb_device
+  local target_device="$SELECTED_DEVICE"
+
+  # Confirm destruction NOW, not after 20 min build
+  echo ""
+  echo "WARNING: This will ERASE ALL DATA on $target_device"
+  read -p "Type 'yes' to confirm: " confirm
+  if [ "$confirm" != "yes" ]; then
+    echo "Aborted"
+    kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
+    exit 0
+  fi
+
+  echo ""
+  echo "=== Running: clean + build + usb ==="
+  echo "Target USB: $target_device"
+  echo ""
+
+  # Clean
+  echo "=== Step 1/3: Clean ==="
+  clean
+  echo ""
+
+  # Build
+  echo "=== Step 2/3: Build ==="
+  build_iso
+  echo ""
+
+  # Write to USB
+  echo "=== Step 3/3: Write to USB ==="
+  write_usb "$target_device" "yes"
+
+  # Kill sudo keepalive
+  kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
+
+  echo ""
+  echo "=== All done! ==="
+}
+
 # Main
-case "${1:-build}" in
+case "${1:-all}" in
+  all)
+    do_all
+    ;;
   build)
     build_iso
     ;;
