@@ -96,6 +96,18 @@ chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 echo "=== Disabling gnome-initial-setup ==="
 # Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
 
+# 0. Disable via GDM config (belt-and-suspenders)
+# Ref: https://help.gnome.org/admin/gdm/stable/configuration.html
+mkdir -p "$SQUASH_DIR/etc/gdm3"
+if [ -f "$SQUASH_DIR/etc/gdm3/custom.conf" ]; then
+  sed -i '/^\[daemon\]/a InitialSetupEnable=false' "$SQUASH_DIR/etc/gdm3/custom.conf"
+else
+  cat > "$SQUASH_DIR/etc/gdm3/custom.conf" << 'EOF'
+[daemon]
+InitialSetupEnable=false
+EOF
+fi
+
 # 1. Mask systemd user service (symlink to /dev/null)
 mkdir -p "$SQUASH_DIR/etc/systemd/user"
 ln -sf /dev/null "$SQUASH_DIR/etc/systemd/user/gnome-initial-setup-first-login.service"
@@ -197,6 +209,18 @@ if [ -x "$SQUASH_DIR/usr/bin/apt-get" ] && [ -d "$SQUASH_DIR/var/lib/dpkg" ]; th
   umount "$SQUASH_DIR/dev" 2>/dev/null || true
   rm -f "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
 fi
+
+# Forcefully remove gnome-initial-setup files even if apt failed
+echo "=== Force-removing gnome-initial-setup files ==="
+rm -f "$SQUASH_DIR/usr/libexec/gnome-initial-setup" 2>/dev/null || true
+rm -f "$SQUASH_DIR/usr/libexec/gnome-initial-setup-copy-worker" 2>/dev/null || true
+rm -f "$SQUASH_DIR/usr/lib/systemd/user/gnome-initial-setup"*.service 2>/dev/null || true
+rm -f "$SQUASH_DIR/usr/lib/systemd/user/gnome-initial-setup"*.target 2>/dev/null || true
+rm -f "$SQUASH_DIR/usr/share/applications/gnome-initial-setup"*.desktop 2>/dev/null || true
+rm -rf "$SQUASH_DIR/usr/share/gnome-initial-setup" 2>/dev/null || true
+# Remove any autostart entries that might exist in other locations
+find "$SQUASH_DIR/etc/xdg" -name "*gnome-initial-setup*" ! -name "gnome-initial-setup-first-login.desktop" -delete 2>/dev/null || true
+find "$SQUASH_DIR/usr/share/gdm" -name "*initial-setup*" -delete 2>/dev/null || true
 
 echo "=== Copying wallpapers ==="
 mkdir -p "$SQUASH_DIR/usr/share/backgrounds/custom"
