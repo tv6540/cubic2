@@ -51,6 +51,18 @@ mkdir -p "$SQUASH_DIR/etc/xdg/autostart"
 cp /work/pre-setup/setup.desktop "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 
+# Disable gnome-initial-setup (Welcome to Ubuntu wizard)
+rm -f "$SQUASH_DIR/etc/xdg/autostart/gnome-initial-setup-first-login.desktop"
+mkdir -p "$SQUASH_DIR/etc/skel/.config"
+echo "yes" > "$SQUASH_DIR/etc/skel/.config/gnome-initial-setup-done"
+
+# VLC - disable metadata network access by default
+mkdir -p "$SQUASH_DIR/etc/skel/.config/vlc"
+cat > "$SQUASH_DIR/etc/skel/.config/vlc/vlcrc" << 'EOF'
+[qt]
+metadata-network-access=0
+EOF
+
 # Note: Package modification (removing ubiquity, installing git) is skipped
 # because Docker containers typically don't have network access for apt.
 # The live system will have network at boot time - setup script handles git clone.

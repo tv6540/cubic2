@@ -1,6 +1,23 @@
 #!/bin/bash
 set -e
 
+echo -e "\n>>>> Removing unwanted packages"
+sudo apt-get remove -y --purge \
+  firefox \
+  thunderbird \
+  gnome-initial-setup \
+  rhythmbox \
+  libreoffice-* \
+  totem \
+  remmina \
+  shotwell \
+  software-properties-gtk \
+  update-manager \
+  usb-creator-gtk \
+  transmission-gtk \
+  2>/dev/null || true
+sudo apt-get autoremove -y
+
 echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
 xrandr --output HDMI-1 --primary --mode 1600x900
 
@@ -28,6 +45,9 @@ wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.de
 sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
 rm -f google-chrome-stable_current_amd64.deb
 
+# Fix Chrome sandbox issue for live USB
+sudo sed -i 's|Exec=/usr/bin/google-chrome-stable|Exec=/usr/bin/google-chrome-stable --no-sandbox|g' /usr/share/applications/google-chrome.desktop
+
 install_chrome_extension() {
   local ext_id="$1"
   local ext_name="$2"
@@ -50,8 +70,19 @@ echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
 sudo chmod +x /usr/bin/x
 
+echo -e "\n>>>> Setting dock favorites"
+gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']"
+
+echo -e "\n>>>> Enabling dark mode"
+gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+
 echo -e "\n>>>> Cleaning up"
 rm -rf /tmp/cubic2
 
-echo -e "\n>>>> Setup complete! Sign into Chrome to sync your data."
+echo -e "\n>>>> Setup complete!"
 echo -e "    Tip: Run 'x' anytime to reset display/audio settings."
+echo -e "    Log: ~/setup.log"
+echo "=== Setup finished at $(date) ==="
+
+echo -e "\n>>>> Launching Chrome..."
+google-chrome-stable --no-sandbox --start-fullscreen "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" &
