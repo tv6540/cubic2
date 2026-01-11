@@ -141,13 +141,14 @@ if command -v google-chrome-stable &> /dev/null; then
   # --no-default-browser-check: skip default browser prompt
   # --disable-session-crashed-bubble: no crash recovery prompt
   # --no-sandbox: required for live USB environment (overlayfs causes sandbox failures)
+  # Ref: https://old.liewcf.com/google-account-chooser-8738/
   setsid google-chrome-stable \
     --no-first-run \
     --no-default-browser-check \
     --disable-session-crashed-bubble \
     --no-sandbox \
     --start-fullscreen \
-    "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" \
+    "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" \
     </dev/null >/dev/null 2>&1 &
   echo "Chrome launched (PID: $!)"
 else
