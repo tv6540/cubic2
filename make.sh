@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$SCRIPT_DIR/work"
-UBUNTU_VERSION="${UBUNTU_VERSION:-24.04.1}"
+UBUNTU_VERSION="${UBUNTU_VERSION:-24.04.3}"
 UBUNTU_URL="https://releases.ubuntu.com/${UBUNTU_VERSION}/ubuntu-${UBUNTU_VERSION}-desktop-amd64.iso"
 ISO_NAME="ubuntu-${UBUNTU_VERSION}-desktop-amd64.iso"
 OUTPUT_ISO="ubuntu-${UBUNTU_VERSION}-e6540.iso"
@@ -19,7 +19,7 @@ print_usage() {
   echo "  usb       Write ISO to USB (interactive device selection)"
   echo ""
   echo "Environment variables:"
-  echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.1)"
+  echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.3)"
   echo ""
   echo "Examples:"
   echo "  $0                    # Build ISO"

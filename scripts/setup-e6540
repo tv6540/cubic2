@@ -19,16 +19,18 @@ sudo apt-get remove -y --purge \
 sudo apt-get autoremove -y
 
 echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
-xrandr --output HDMI-1 --primary --mode 1600x900
+xrandr --output HDMI-1 --primary --mode 1600x900 || echo "Warning: HDMI-1 config failed, skipping"
 
 echo -e "\n>>>> Disabling built-in display (eDP-1)"
-xrandr --output eDP-1 --off
+xrandr --output eDP-1 --off || echo "Warning: eDP-1 disable failed, skipping"
 
-echo -e "\n>>>> Setting screen timeout to never"
-gsettings set org.gnome.desktop.session idle-delay 0
+# Screen timeout handled in security section (5 min idle lock)
+# Video players auto-inhibit screensaver during playback
 
 echo -e "\n>>>> Ignoring lid switch"
-echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf
+if ! grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf; then
+  echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf
+fi
 
 echo -e "\n>>>> Setting HDMI audio as default"
 HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
@@ -75,6 +77,39 @@ gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desk
 
 echo -e "\n>>>> Enabling dark mode"
 gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+
+echo -e "\n>>>> Hardening security"
+# Enable firewall - deny all incoming, allow outgoing
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw --force enable
+
+# Disable SSH if present
+sudo systemctl disable ssh 2>/dev/null || true
+sudo systemctl stop ssh 2>/dev/null || true
+
+# Disable Bluetooth (attack surface)
+sudo systemctl disable bluetooth 2>/dev/null || true
+sudo systemctl stop bluetooth 2>/dev/null || true
+
+# Auto-lock screen after 5 minutes of inactivity
+gsettings set org.gnome.desktop.screensaver lock-enabled true
+gsettings set org.gnome.desktop.screensaver lock-delay 0
+gsettings set org.gnome.desktop.session idle-delay 300
+
+# Disable remote desktop
+gsettings set org.gnome.desktop.remote-desktop.rdp enable false 2>/dev/null || true
+gsettings set org.gnome.desktop.remote-desktop.vnc enable false 2>/dev/null || true
+
+# Remount USB as read-only to prevent malware persistence
+USB_DEVICE=$(mount | grep /cdrom | awk '{print $1}')
+if [ -n "$USB_DEVICE" ]; then
+  sudo mount -o remount,ro /cdrom 2>/dev/null || true
+  echo "USB remounted read-only"
+fi
+
+# Disable fwupd to prevent firmware modifications
+sudo systemctl mask fwupd 2>/dev/null || true
 
 echo -e "\n>>>> Cleaning up"
 rm -rf /tmp/cubic2
