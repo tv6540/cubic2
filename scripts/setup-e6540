@@ -1,22 +1,8 @@
 #!/bin/bash
 set -e
 
-echo -e "\n>>>> Removing unwanted packages"
-sudo apt-get remove -y --purge \
-  firefox \
-  thunderbird \
-  gnome-initial-setup \
-  rhythmbox \
-  libreoffice-* \
-  totem \
-  remmina \
-  shotwell \
-  software-properties-gtk \
-  update-manager \
-  usb-creator-gtk \
-  transmission-gtk \
-  2>/dev/null || true
-sudo apt-get autoremove -y
+# Note: Package removal (Firefox, LibreOffice, etc.) is done at ISO build time
+# via chroot in docker-build.sh for smaller ISO and reduced attack surface
 
 echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
 xrandr --output HDMI-1 --primary --mode 1600x900 || echo "Warning: HDMI-1 config failed, skipping"
@@ -62,8 +48,7 @@ install_chrome_extension() {
 
 echo -e "\n>>>> Installing Chrome extensions"
 install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
-install_chrome_extension "hpnelpabemhjfjgiibgkliipaehnfcjk" "YouTube Skip Ad Trigger"
-install_chrome_extension "lokpenepehfdekijkebhpnpcjjpngpnd" "YouTube Ad Auto-skipper"
+install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube™ Ads"
 
 echo -e "\n>>>> Installing VLC"
 sudo apt install -y vlc
@@ -108,11 +93,22 @@ echo -e "    Log: ~/setup.log"
 echo "=== Setup finished at $(date) ==="
 
 echo -e "\n>>>> Launching Chrome..."
-sleep 2
+sleep 3
 if command -v google-chrome-stable &> /dev/null; then
-  nohup google-chrome-stable --no-sandbox --start-fullscreen "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" >/dev/null 2>&1 &
-  disown
-  echo "Chrome launched"
+  # Use setsid to fully detach from terminal session
+  # Ref: https://www.baeldung.com/linux/detach-process-from-terminal
+  # --no-first-run: skip first run experience
+  # --no-default-browser-check: skip default browser prompt
+  # --disable-session-crashed-bubble: no crash recovery prompt
+  setsid google-chrome-stable \
+    --no-sandbox \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-session-crashed-bubble \
+    --start-fullscreen \
+    "https://accounts.google.com/v3/signin/identifier?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" \
+    </dev/null >/dev/null 2>&1 &
+  echo "Chrome launched (PID: $!)"
 else
   echo "ERROR: Chrome not found!"
 fi

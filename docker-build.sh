@@ -101,10 +101,68 @@ dconf compile "$SQUASH_DIR/home/ubuntu/.config/dconf/user" /tmp/dconf-keyfiles.d
 chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config/dconf"
 rm -rf /tmp/dconf-keyfiles.d
 
-# Note: Package modification (removing ubiquity, installing git) is skipped
-# because Docker containers typically don't have network access for apt.
-# The live system will have network at boot time - setup script handles git clone.
-echo "=== Skipping package modification (no network in build container) ==="
+# Remove unwanted packages via chroot
+# Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
+echo "=== Removing unwanted packages via chroot ==="
+
+# Setup chroot environment
+cp /etc/resolv.conf "$SQUASH_DIR/etc/resolv.conf"
+mount --bind /dev "$SQUASH_DIR/dev"
+mount --bind /dev/pts "$SQUASH_DIR/dev/pts"
+mount -t proc proc "$SQUASH_DIR/proc"
+mount -t sysfs sysfs "$SQUASH_DIR/sys"
+
+# Remove bloatware packages inside chroot
+chroot "$SQUASH_DIR" /bin/bash -c '
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get remove -y --purge \
+  gnome-initial-setup \
+  firefox \
+  thunderbird \
+  libreoffice-* \
+  rhythmbox \
+  totem \
+  remmina \
+  shotwell \
+  software-properties-gtk \
+  update-manager \
+  usb-creator-gtk \
+  transmission-gtk \
+  yelp \
+  gnome-user-docs \
+  ubuntu-report \
+  popularity-contest \
+  2>/dev/null || true
+apt-get autoremove -y
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+
+# Mask gnome-initial-setup service globally for all users
+# Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
+systemctl --global mask gnome-initial-setup-first-login.service 2>/dev/null || true
+'
+
+# Cleanup chroot mounts
+umount "$SQUASH_DIR/sys" || true
+umount "$SQUASH_DIR/proc" || true
+umount "$SQUASH_DIR/dev/pts" || true
+umount "$SQUASH_DIR/dev" || true
+rm -f "$SQUASH_DIR/etc/resolv.conf"
+
+# Chrome enterprise policy to disable Privacy Sandbox prompt
+# Ref: https://support.google.com/chrome/a/answer/9027408
+# Ref: https://chromeenterprise.google/policies/
+mkdir -p "$SQUASH_DIR/etc/opt/chrome/policies/managed"
+cat > "$SQUASH_DIR/etc/opt/chrome/policies/managed/custom_policy.json" << 'EOF'
+{
+  "PrivacySandboxPromptEnabled": false,
+  "PrivacySandboxAdMeasurementEnabled": false,
+  "PrivacySandboxAdTopicsEnabled": false,
+  "PrivacySandboxSiteEnabledAdsEnabled": false
+}
+EOF
+chmod 644 "$SQUASH_DIR/etc/opt/chrome/policies/managed/custom_policy.json"
 
 echo "=== Configuring GRUB ==="
 # Set timeout to 5 seconds
