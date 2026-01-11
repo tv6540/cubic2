@@ -1,0 +1,38 @@
+#!/bin/bash
+set -e
+
+REPO_URL="https://github.com/tv6540/cubic2.git"
+SETUP_DIR="/tmp/cubic2"
+
+check_online() {
+  local retries=0
+  local max_retries=10
+
+  while [ $retries -lt $max_retries ]; do
+    if ping -c 1 github.com &> /dev/null; then
+      echo "Online"
+      return 0
+    fi
+    retries=$((retries + 1))
+    echo "Offline. Retry $retries/$max_retries"
+    sleep 5
+  done
+
+  echo "Failed to connect after $max_retries attempts"
+  exit 1
+}
+
+main() {
+  echo "Checking internet connectivity..."
+  check_online
+
+  echo "Cloning setup repository..."
+  rm -rf "$SETUP_DIR"
+  git clone -q "$REPO_URL" "$SETUP_DIR"
+
+  echo "Running setup..."
+  chmod +x "$SETUP_DIR/scripts/setup-e6540"
+  "$SETUP_DIR/scripts/setup-e6540"
+}
+
+main

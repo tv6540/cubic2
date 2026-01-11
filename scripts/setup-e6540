@@ -1,0 +1,57 @@
+#!/bin/bash
+set -e
+
+echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
+xrandr --output HDMI-1 --primary --mode 1600x900
+
+echo -e "\n>>>> Disabling built-in display (eDP-1)"
+xrandr --output eDP-1 --off
+
+echo -e "\n>>>> Setting screen timeout to never"
+gsettings set org.gnome.desktop.session idle-delay 0
+
+echo -e "\n>>>> Ignoring lid switch"
+echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf
+
+echo -e "\n>>>> Setting HDMI audio as default"
+HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
+if [ -n "$HDMI_SINK" ]; then
+  pactl set-default-sink "$HDMI_SINK"
+fi
+
+echo -e "\n>>>> Setting timezone to Pacific"
+sudo timedatectl set-timezone America/Los_Angeles
+
+echo -e "\n>>>> Installing Google Chrome"
+cd /tmp
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+rm -f google-chrome-stable_current_amd64.deb
+
+install_chrome_extension() {
+  local ext_id="$1"
+  local ext_name="$2"
+  local pref_dir="/opt/google/chrome/extensions"
+  local pref_file="$pref_dir/$ext_id.json"
+  sudo mkdir -p "$pref_dir"
+  echo '{"external_update_url":"https://clients2.google.com/service/update2/crx"}' | sudo tee "$pref_file" > /dev/null
+  echo "Installed extension: $ext_name"
+}
+
+echo -e "\n>>>> Installing Chrome extensions"
+install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
+install_chrome_extension "hpnelpabemhjfjgiibgkliipaehnfcjk" "YouTube Skip Ad Trigger"
+install_chrome_extension "lokpenepehfdekijkebhpnpcjjpngpnd" "YouTube Ad Auto-skipper"
+
+echo -e "\n>>>> Installing VLC"
+sudo snap install vlc || true
+
+echo -e "\n>>>> Installing quick reset command (x)"
+sudo cp /tmp/cubic2/scripts/x /usr/bin/x
+sudo chmod +x /usr/bin/x
+
+echo -e "\n>>>> Cleaning up"
+rm -rf /tmp/cubic2
+
+echo -e "\n>>>> Setup complete! Sign into Chrome to sync your data."
+echo -e "    Tip: Run 'x' anytime to reset display/audio settings."

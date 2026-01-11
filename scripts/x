@@ -1,0 +1,19 @@
+#!/bin/bash
+# Quick display/audio reset - run with: x
+
+echo -e ">>>> Setting HDMI-1 as primary at 1600x900"
+xrandr --output HDMI-1 --primary --mode 1600x900
+
+echo -e "\n>>>> Disabling built-in display (eDP-1)"
+xrandr --output eDP-1 --off
+
+echo -e "\n>>>> Setting screen timeout to never"
+gsettings set org.gnome.desktop.session idle-delay 0
+
+echo -e "\n>>>> Setting HDMI audio as default"
+HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
+if [ -n "$HDMI_SINK" ]; then
+  pactl set-default-sink "$HDMI_SINK"
+fi
+
+echo -e "\n>>>> Done"
