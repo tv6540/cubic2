@@ -1,8 +1,11 @@
 #!/bin/bash
 set -e
 
-# Note: Package removal (Firefox, LibreOffice, etc.) is done at ISO build time
-# via chroot in docker-build.sh for smaller ISO and reduced attack surface
+# Kill and remove gnome-initial-setup immediately (layered squashfs means build-time removal doesn't work)
+echo -e "\n>>>> Killing gnome-initial-setup"
+pkill -f gnome-initial-setup 2>/dev/null || true
+sudo rm -f /etc/xdg/autostart/gnome-initial-setup-first-login.desktop 2>/dev/null || true
+sudo apt-get remove -y --purge gnome-initial-setup 2>/dev/null || true
 
 echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
 xrandr --output HDMI-1 --primary --mode 1600x900 || echo "Warning: HDMI-1 config failed, skipping"
@@ -12,6 +15,15 @@ xrandr --output eDP-1 --off || echo "Warning: eDP-1 disable failed, skipping"
 
 # Screen timeout handled in security section (5 min idle lock)
 # Video players auto-inhibit screensaver during playback
+
+echo -e "\n>>>> Setting random wallpaper"
+WALLPAPERS=(/usr/share/backgrounds/custom/wp-*.jpg)
+if [ ${#WALLPAPERS[@]} -gt 0 ]; then
+  RANDOM_WP="${WALLPAPERS[RANDOM % ${#WALLPAPERS[@]}]}"
+  gsettings set org.gnome.desktop.background picture-uri "file://$RANDOM_WP"
+  gsettings set org.gnome.desktop.background picture-uri-dark "file://$RANDOM_WP"
+  echo "Applied wallpaper: $RANDOM_WP"
+fi
 
 echo -e "\n>>>> Ignoring lid switch"
 if ! grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf; then

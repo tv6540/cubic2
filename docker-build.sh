@@ -30,15 +30,39 @@ mkdir -p "$EXTRACT_DIR"
 xorriso -osirrox on -indev "$ISO_IN" -extract / "$EXTRACT_DIR"
 chmod -R u+w "$EXTRACT_DIR"
 
-echo "=== Finding and extracting squashfs ==="
-SQUASHFS_PATH=$(find "$EXTRACT_DIR" -name "*.squashfs" -o -name "filesystem.squashfs" 2>/dev/null | head -1)
-if [ -z "$SQUASHFS_PATH" ]; then
-  SQUASHFS_PATH="$EXTRACT_DIR/casper/filesystem.squashfs"
-fi
-echo "Found squashfs at: $SQUASHFS_PATH"
-
+echo "=== Extracting and merging layered squashfs ==="
+# Ubuntu 24.04 uses layered squashfs - must merge all layers
+# Order: minimal → minimal.standard → minimal.standard.live
 rm -rf "$SQUASH_DIR"
-unsquashfs -d "$SQUASH_DIR" "$SQUASHFS_PATH"
+CASPER_DIR="$EXTRACT_DIR/casper"
+
+if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
+  echo "Extracting minimal.squashfs (base layer)..."
+  unsquashfs -d "$SQUASH_DIR" "$CASPER_DIR/minimal.squashfs"
+
+  if [ -f "$CASPER_DIR/minimal.standard.squashfs" ]; then
+    echo "Merging minimal.standard.squashfs..."
+    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.squashfs"
+  fi
+
+  if [ -f "$CASPER_DIR/minimal.standard.live.squashfs" ]; then
+    echo "Merging minimal.standard.live.squashfs..."
+    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.live.squashfs"
+  fi
+
+  SQUASHFS_PATH="$CASPER_DIR/filesystem.squashfs"
+  # Remove old layered files - we'll create single merged squashfs
+  rm -f "$CASPER_DIR"/*.squashfs
+else
+  # Fallback for non-layered squashfs
+  SQUASHFS_PATH=$(find "$EXTRACT_DIR" -name "filesystem.squashfs" 2>/dev/null | head -1)
+  if [ -z "$SQUASHFS_PATH" ]; then
+    SQUASHFS_PATH="$CASPER_DIR/filesystem.squashfs"
+  fi
+  echo "Found squashfs at: $SQUASHFS_PATH"
+  unsquashfs -d "$SQUASH_DIR" "$SQUASHFS_PATH"
+fi
+echo "Squashfs extracted to: $SQUASH_DIR"
 
 echo "=== Injecting setup files ==="
 # Copy setup script
@@ -150,6 +174,11 @@ umount "$SQUASH_DIR/dev/pts" || true
 umount "$SQUASH_DIR/dev" || true
 rm -f "$SQUASH_DIR/etc/resolv.conf"
 
+# Copy wallpapers for random selection at runtime
+mkdir -p "$SQUASH_DIR/usr/share/backgrounds/custom"
+cp /work/wallpaper/wp-*.jpg "$SQUASH_DIR/usr/share/backgrounds/custom/"
+chmod 644 "$SQUASH_DIR/usr/share/backgrounds/custom/"*.jpg
+
 # Chrome enterprise policy to disable Privacy Sandbox prompt
 # Ref: https://support.google.com/chrome/a/answer/9027408
 # Ref: https://chromeenterprise.google/policies/
@@ -175,25 +204,10 @@ echo "=== Removing unused files to reduce ISO size ==="
 rm -rf "$EXTRACT_DIR/pool"
 rm -rf "$EXTRACT_DIR/dists"
 
-# Keep only core squashfs layers, remove all variants (language, secureboot, etc.)
-# Required: minimal.squashfs, minimal.standard.squashfs, minimal.standard.live.squashfs
-find "$EXTRACT_DIR/casper" -name "*.squashfs" \
-  ! -name "minimal.squashfs" \
-  ! -name "minimal.standard.squashfs" \
-  ! -name "minimal.standard.live.squashfs" \
-  -delete
-# Clean up related metadata files
-find "$EXTRACT_DIR/casper" -name "*.squashfs.gpg" -delete
-find "$EXTRACT_DIR/casper" -name "*.manifest" \
-  ! -name "minimal.squashfs.manifest" \
-  ! -name "minimal.standard.squashfs.manifest" \
-  ! -name "minimal.standard.live.squashfs.manifest" \
-  -delete
-find "$EXTRACT_DIR/casper" -name "*.size" \
-  ! -name "minimal.size" \
-  ! -name "minimal.standard.size" \
-  ! -name "minimal.standard.live.size" \
-  -delete
+# Clean up old squashfs metadata files (we merged layers into single filesystem.squashfs)
+find "$EXTRACT_DIR/casper" -name "*.squashfs.gpg" -delete 2>/dev/null || true
+find "$EXTRACT_DIR/casper" -name "*.manifest" -delete 2>/dev/null || true
+find "$EXTRACT_DIR/casper" -name "*.size" -delete 2>/dev/null || true
 
 echo "=== Repacking squashfs ==="
 rm -f "$SQUASHFS_PATH"
