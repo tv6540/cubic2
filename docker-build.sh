@@ -3,8 +3,27 @@ set -e
 
 ISO_IN="/work/input.iso"
 ISO_OUT="/work/output.iso"
-EXTRACT_DIR="/work/extract"
-SQUASH_DIR="/work/squashfs"
+# Use container's native filesystem for operations that need full Linux support
+EXTRACT_DIR="/tmp/extract"
+SQUASH_DIR="/tmp/squashfs"
+EFI_IMG="/tmp/efi.img"
+
+echo "=== Extracting EFI partition from original ISO ==="
+# Get EFI partition info using xorriso report
+EFI_INFO=$(xorriso -indev "$ISO_IN" -report_el_torito as_mkisofs 2>&1 | grep -A1 "append_partition 2")
+# Extract the interval range (e.g., 12105120d-12115263d)
+INTERVAL=$(echo "$EFI_INFO" | grep -oP '\d+d-\d+d' | head -1)
+if [ -n "$INTERVAL" ]; then
+  START_SECTOR=$(echo "$INTERVAL" | cut -d'-' -f1 | tr -d 'd')
+  END_SECTOR=$(echo "$INTERVAL" | cut -d'-' -f2 | tr -d 'd')
+  COUNT=$((END_SECTOR - START_SECTOR + 1))
+  echo "Extracting EFI partition: sectors $START_SECTOR to $END_SECTOR ($COUNT sectors)"
+  dd if="$ISO_IN" of="$EFI_IMG" bs=512 skip="$START_SECTOR" count="$COUNT" status=progress
+else
+  echo "Warning: Could not find EFI partition info, creating minimal EFI image"
+  # Create a minimal EFI boot image as fallback
+  dd if=/dev/zero of="$EFI_IMG" bs=1M count=5
+fi
 
 echo "=== Extracting ISO ==="
 mkdir -p "$EXTRACT_DIR"
@@ -32,9 +51,41 @@ mkdir -p "$SQUASH_DIR/etc/xdg/autostart"
 cp /work/pre-setup/setup.desktop "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 
-# Remove ubiquity (installer) and install git
-echo "=== Configuring squashfs packages ==="
-chroot "$SQUASH_DIR" /bin/bash -c "apt-get update && apt-get remove -y --purge ubiquity ubiquity-* && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/*" || true
+# Note: Package modification (removing ubiquity, installing git) is skipped
+# because Docker containers typically don't have network access for apt.
+# The live system will have network at boot time - setup script handles git clone.
+echo "=== Skipping package modification (no network in build container) ==="
+
+echo "=== Configuring GRUB ==="
+# Set timeout to 5 seconds
+sed -i 's/set timeout=30/set timeout=5/' "$EXTRACT_DIR/boot/grub/grub.cfg"
+# Remove quiet splash to show boot progress, add nomodeset for compatibility
+sed -i 's/quiet splash/nomodeset/' "$EXTRACT_DIR/boot/grub/grub.cfg"
+
+echo "=== Removing unused files to reduce ISO size ==="
+# Remove offline package pool (~1.9GB) - not needed with internet access
+rm -rf "$EXTRACT_DIR/pool"
+rm -rf "$EXTRACT_DIR/dists"
+
+# Keep only core squashfs layers, remove all variants (language, secureboot, etc.)
+# Required: minimal.squashfs, minimal.standard.squashfs, minimal.standard.live.squashfs
+find "$EXTRACT_DIR/casper" -name "*.squashfs" \
+  ! -name "minimal.squashfs" \
+  ! -name "minimal.standard.squashfs" \
+  ! -name "minimal.standard.live.squashfs" \
+  -delete
+# Clean up related metadata files
+find "$EXTRACT_DIR/casper" -name "*.squashfs.gpg" -delete
+find "$EXTRACT_DIR/casper" -name "*.manifest" \
+  ! -name "minimal.squashfs.manifest" \
+  ! -name "minimal.standard.squashfs.manifest" \
+  ! -name "minimal.standard.live.squashfs.manifest" \
+  -delete
+find "$EXTRACT_DIR/casper" -name "*.size" \
+  ! -name "minimal.size" \
+  ! -name "minimal.standard.size" \
+  ! -name "minimal.standard.live.size" \
+  -delete
 
 echo "=== Repacking squashfs ==="
 rm -f "$SQUASHFS_PATH"
@@ -45,22 +96,29 @@ FSSIZE_PATH=$(dirname "$SQUASHFS_PATH")/filesystem.size
 printf $(du -sx --block-size=1 "$SQUASH_DIR" | cut -f1) > "$FSSIZE_PATH"
 
 echo "=== Regenerating md5sum.txt ==="
-cd "$EXTRACT_DIR"
-find . -type f -print0 | xargs -0 md5sum | grep -v isolinux/boot.cat | grep -v md5sum.txt > md5sum.txt || true
+(cd "$EXTRACT_DIR" && find . -type f -print0 | xargs -0 md5sum | grep -v isolinux/boot.cat | grep -v md5sum.txt > md5sum.txt) || true
 
 echo "=== Rebuilding ISO ==="
+# Get EFI image size in 512-byte sectors for boot-load-size
+EFI_SIZE_SECTORS=$(( $(stat -c%s "$EFI_IMG") / 512 ))
+echo "EFI image size: $EFI_SIZE_SECTORS sectors"
+
 xorriso -as mkisofs \
   -r -V "Ubuntu Custom" \
   -o "$ISO_OUT" \
   -J -joliet-long \
   -l \
   -iso-level 3 \
+  -partition_cyl_align off \
   -partition_offset 16 \
   --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
-  -append_partition 2 0xef "$EXTRACT_DIR/boot/grub/efi.img" \
+  --protective-msdos-label \
+  --mbr-force-bootable \
+  -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b "$EFI_IMG" \
   -appended_part_as_gpt \
-  -c boot/boot.cat \
-  -b boot/grub/i386-pc/eltorito.img \
+  -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 \
+  -c '/boot.catalog' \
+  -b 'boot/grub/i386-pc/eltorito.img' \
   -no-emul-boot \
   -boot-load-size 4 \
   -boot-info-table \
@@ -68,17 +126,11 @@ xorriso -as mkisofs \
   -eltorito-alt-boot \
   -e --interval:appended_partition_2:all:: \
   -no-emul-boot \
-  "$EXTRACT_DIR" 2>/dev/null || \
-xorriso -as mkisofs \
-  -r -V "Ubuntu Custom" \
-  -o "$ISO_OUT" \
-  -J -joliet-long \
-  -l \
-  -b isolinux/isolinux.bin \
-  -c isolinux/boot.cat \
-  -no-emul-boot \
-  -boot-load-size 4 \
-  -boot-info-table \
+  -boot-load-size "$EFI_SIZE_SECTORS" \
   "$EXTRACT_DIR"
 
-echo "=== Done! Output: $ISO_OUT ==="
+echo "=== Cleaning up ==="
+rm -rf "$EXTRACT_DIR" "$SQUASH_DIR" "$EFI_IMG"
+
+ISO_SIZE=$(du -h "$ISO_OUT" | cut -f1)
+echo "=== Done! Output: $ISO_OUT ($ISO_SIZE) ==="

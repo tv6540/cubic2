@@ -16,7 +16,7 @@ print_usage() {
   echo "  build     Build the customized ISO (default)"
   echo "  download  Download Ubuntu ISO only"
   echo "  clean     Remove work directory and Docker image"
-  echo "  usb       Write ISO to USB (requires: $0 usb /dev/sdX)"
+  echo "  usb       Write ISO to USB (interactive device selection)"
   echo ""
   echo "Environment variables:"
   echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.1)"
@@ -25,7 +25,8 @@ print_usage() {
   echo "  $0                    # Build ISO"
   echo "  $0 build              # Build ISO"
   echo "  $0 download           # Download Ubuntu ISO only"
-  echo "  $0 usb /dev/sdb       # Write to USB device"
+  echo "  $0 usb                # Write to USB (shows device picker)"
+  echo "  $0 usb /dev/disk4     # Write to specific device"
   echo "  UBUNTU_VERSION=24.04 $0 build  # Use specific version"
 }
 
@@ -71,7 +72,7 @@ download_iso() {
 
 build_docker_image() {
   echo "Building Docker image..."
-  docker build -t "$DOCKER_IMAGE" "$SCRIPT_DIR"
+  docker build --platform linux/amd64 -t "$DOCKER_IMAGE" "$SCRIPT_DIR"
 }
 
 build_iso() {
@@ -86,7 +87,7 @@ build_iso() {
   cp -r "$SCRIPT_DIR/pre-setup" "$WORK_DIR/"
 
   # Run Docker container to modify ISO
-  docker run --rm --privileged \
+  docker run --rm --privileged --platform linux/amd64 \
     -v "$WORK_DIR/$ISO_NAME:/work/input.iso:ro" \
     -v "$WORK_DIR:/work" \
     "$DOCKER_IMAGE"
@@ -104,15 +105,66 @@ build_iso() {
   fi
 }
 
+list_usb_devices() {
+  case "$(uname -s)" in
+    Darwin*)
+      # macOS - list external physical disks
+      diskutil list external 2>/dev/null | grep -E "^/dev/disk" | while read -r line; do
+        local disk=$(echo "$line" | awk '{print $1}')
+        local size=$(diskutil info "$disk" 2>/dev/null | grep "Disk Size" | awk -F: '{print $2}' | xargs)
+        local name=$(diskutil info "$disk" 2>/dev/null | grep "Media Name" | awk -F: '{print $2}' | xargs)
+        echo "$disk|$size|$name"
+      done
+      ;;
+    Linux*)
+      # Linux - list removable block devices
+      lsblk -d -o NAME,SIZE,MODEL,RM 2>/dev/null | awk '$4 == "1" {print "/dev/"$1"|"$2"|"$3}'
+      ;;
+  esac
+}
+
+select_usb_device() {
+  echo "Scanning for USB devices..."
+  echo ""
+
+  local devices=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && devices+=("$line")
+  done < <(list_usb_devices)
+
+  if [ ${#devices[@]} -eq 0 ]; then
+    echo "No USB devices found."
+    echo "Please insert a USB drive and try again."
+    exit 1
+  fi
+
+  echo "Available USB devices:"
+  echo ""
+  for i in "${!devices[@]}"; do
+    IFS='|' read -r dev size name <<< "${devices[$i]}"
+    printf "  [%d] %s - %s (%s)\n" $((i+1)) "$dev" "${size:-unknown size}" "${name:-unnamed}"
+  done
+  echo ""
+
+  local selection
+  while true; do
+    read -p "Select device [1-${#devices[@]}] or 'q' to quit: " selection
+    if [[ "$selection" == "q" ]]; then
+      echo "Aborted"
+      exit 0
+    fi
+    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#devices[@]} ]; then
+      break
+    fi
+    echo "Invalid selection. Please enter a number between 1 and ${#devices[@]}"
+  done
+
+  IFS='|' read -r SELECTED_DEVICE _ _ <<< "${devices[$((selection-1))]}"
+}
+
 write_usb() {
   local device="$1"
   local iso_path="$SCRIPT_DIR/$OUTPUT_ISO"
-
-  if [ -z "$device" ]; then
-    echo "Error: No device specified"
-    echo "Usage: $0 usb /dev/sdX"
-    exit 1
-  fi
 
   if [ ! -f "$iso_path" ]; then
     echo "Error: ISO not found at $iso_path"
@@ -120,14 +172,21 @@ write_usb() {
     exit 1
   fi
 
-  echo "WARNING: This will erase all data on $device"
-  read -p "Continue? (y/N) " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  # If no device specified, show interactive selection
+  if [ -z "$device" ]; then
+    select_usb_device
+    device="$SELECTED_DEVICE"
+  fi
+
+  echo ""
+  echo "WARNING: This will ERASE ALL DATA on $device"
+  read -p "Type 'yes' to confirm: " confirm
+  if [ "$confirm" != "yes" ]; then
     echo "Aborted"
     exit 1
   fi
 
+  echo ""
   echo "Writing ISO to $device..."
 
   # Detect OS and use appropriate command
@@ -149,15 +208,31 @@ write_usb() {
   esac
 
   sync
-  echo "Done! USB is ready to boot."
+
+  # Eject the USB
+  case "$(uname -s)" in
+    Darwin*)
+      diskutil eject "$device" 2>/dev/null || true
+      ;;
+    Linux*)
+      sudo eject "$device" 2>/dev/null || true
+      ;;
+  esac
+
+  echo ""
+  echo "Done! USB is ready to boot (ejected)."
 }
 
 clean() {
-  echo "Cleaning up..."
-  rm -rf "$WORK_DIR"
+  echo "Cleaning up build artifacts (preserving downloaded ISO)..."
+  # Remove pre-setup copy but keep the downloaded ISO
+  rm -rf "$WORK_DIR/pre-setup"
+  rm -rf "$WORK_DIR/extract"
+  rm -rf "$WORK_DIR/squashfs"
+  rm -f "$WORK_DIR/output.iso"
   rm -f "$SCRIPT_DIR/$OUTPUT_ISO"
   docker rmi "$DOCKER_IMAGE" 2>/dev/null || true
-  echo "Clean complete"
+  echo "Clean complete (ISO preserved at $WORK_DIR/$ISO_NAME if present)"
 }
 
 # Main

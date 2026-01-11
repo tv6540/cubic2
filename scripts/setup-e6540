@@ -44,7 +44,7 @@ install_chrome_extension "hpnelpabemhjfjgiibgkliipaehnfcjk" "YouTube Skip Ad Tri
 install_chrome_extension "lokpenepehfdekijkebhpnpcjjpngpnd" "YouTube Ad Auto-skipper"
 
 echo -e "\n>>>> Installing VLC"
-sudo snap install vlc || true
+sudo apt install -y vlc
 
 echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
