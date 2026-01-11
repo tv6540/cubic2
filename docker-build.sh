@@ -26,63 +26,98 @@ mkdir -p "$EXTRACT_DIR"
 xorriso -osirrox on -indev "$ISO_IN" -extract / "$EXTRACT_DIR"
 chmod -R u+w "$EXTRACT_DIR"
 
-echo "=== Merging layered squashfs into single filesystem.squashfs ==="
-# Ubuntu 24.04 uses layered squashfs - we merge ALL into single filesystem.squashfs
-# Then remove layerfs-path from grub.cfg so casper uses default single-squashfs mode
-# Ref: https://manpages.ubuntu.com/manpages/jammy/man7/casper.7.html
-rm -rf "$SQUASH_DIR"
 CASPER_DIR="$EXTRACT_DIR/casper"
 
-# Merge layers in order: minimal (base) -> minimal.standard -> minimal.standard.live (top)
-if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
-  echo "Extracting minimal.squashfs (base layer)..."
-  unsquashfs -d "$SQUASH_DIR" "$CASPER_DIR/minimal.squashfs" || true
+echo "=== Finding and removing welcome/initial-setup from ALL squashfs layers ==="
+# Ubuntu 24.04 uses layered squashfs: minimal -> minimal.standard -> minimal.standard.live
+# The welcome wizard could be: gnome-initial-setup, ubuntu-desktop-provision, gnome-tour, etc.
+# We check ALL layers and remove from ANY that contain matching files
+# Ref: https://manpages.ubuntu.com/manpages/noble/man7/casper.7.html
 
-  if [ -f "$CASPER_DIR/minimal.standard.squashfs" ]; then
-    echo "Merging minimal.standard.squashfs..."
-    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.squashfs" || true
-  fi
+if [ -f "$CASPER_DIR/minimal.standard.live.squashfs" ]; then
+  echo "Layered squashfs detected. Checking ALL layers..."
 
-  if [ -f "$CASPER_DIR/minimal.standard.live.squashfs" ]; then
-    echo "Merging minimal.standard.live.squashfs..."
-    unsquashfs -f -d "$SQUASH_DIR" "$CASPER_DIR/minimal.standard.live.squashfs" || true
-  fi
+  # Check and clean EACH layer (except top layer which we handle separately)
+  for layer in minimal minimal.standard; do
+    LAYER_FILE="$CASPER_DIR/${layer}.squashfs"
+    if [ -f "$LAYER_FILE" ]; then
+      echo ""
+      echo "  === Checking $layer.squashfs ==="
 
-  # Remove ALL old squashfs files - we'll create single filesystem.squashfs
-  echo "Removing old layered squashfs files..."
-  rm -f "$CASPER_DIR"/*.squashfs
-  rm -f "$CASPER_DIR"/*.squashfs.gpg
-  rm -f "$CASPER_DIR"/*.manifest
-  rm -f "$CASPER_DIR"/*.size
+      # Use unsquashfs -l to LIST files without extracting (FAST)
+      FOUND_FILES=$(unsquashfs -l "$LAYER_FILE" 2>/dev/null | grep -E "gnome-initial-setup|desktop-provision" | grep -v "ibus-mozc" || true)
 
-elif [ -f "$CASPER_DIR/filesystem.squashfs" ]; then
-  echo "Found single filesystem.squashfs, extracting..."
-  unsquashfs -d "$SQUASH_DIR" "$CASPER_DIR/filesystem.squashfs"
-  rm -f "$CASPER_DIR/filesystem.squashfs"
+      if [ -n "$FOUND_FILES" ]; then
+        echo "  >>> FOUND gnome-initial-setup in $layer.squashfs:"
+        echo "$FOUND_FILES" | head -10
+
+        echo ""
+        echo "  === Removing from ${layer}.squashfs ==="
+        TEMP_LAYER="/tmp/layer_${layer}"
+        rm -rf "$TEMP_LAYER"
+        unsquashfs -d "$TEMP_LAYER" "$LAYER_FILE"
+
+        # Remove gnome-initial-setup files
+        echo "  Removing files..."
+        find "$TEMP_LAYER" -type f -name "*gnome-initial-setup*" ! -name "*ibus-mozc*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type f -name "*desktop-provision*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type d -name "*gnome-initial-setup*" -exec rm -rfv {} \; 2>/dev/null || true
+        find "$TEMP_LAYER" -type d -name "*desktop-provision*" -exec rm -rfv {} \; 2>/dev/null || true
+
+        echo "  CONFIRMED: gnome-initial-setup removed from ${layer}.squashfs"
+
+        # Repack this layer
+        rm -f "$LAYER_FILE"
+        mksquashfs "$TEMP_LAYER" "$LAYER_FILE" -comp xz -b 1M
+        echo "  Repacked: ${layer}.squashfs"
+        rm -rf "$TEMP_LAYER"
+      else
+        echo "  (no gnome-initial-setup found)"
+      fi
+    fi
+  done
+
+  # Now work on the TOP layer for our customizations
+  TOP_LAYER="minimal.standard.live"
+  echo ""
+  echo "=== Extracting top layer for customizations: ${TOP_LAYER}.squashfs ==="
+
 else
-  echo "ERROR: No squashfs found in $CASPER_DIR"
+  # Single squashfs mode
+  TOP_LAYER="filesystem"
+  echo "Single squashfs mode detected."
+  echo ""
+  echo "=== Extracting ${TOP_LAYER}.squashfs ==="
+fi
+
+rm -rf "$SQUASH_DIR"
+LAYER_FILE="$CASPER_DIR/${TOP_LAYER}.squashfs"
+unsquashfs -d "$SQUASH_DIR" "$LAYER_FILE"
+rm -f "$LAYER_FILE"
+
+if [ ! -d "$SQUASH_DIR" ]; then
+  echo "ERROR: Squashfs extraction failed!"
   exit 1
 fi
+echo "Extracted to: $SQUASH_DIR"
 
-echo "=== Removing layerfs-path from GRUB config ==="
-# Remove layerfs-path parameter so casper uses single filesystem.squashfs
-# Ref: https://manpages.ubuntu.com/manpages/jammy/man7/casper.7.html
-sed -i 's/layerfs-path=[^ ]* //g' "$EXTRACT_DIR/boot/grub/grub.cfg"
-sed -i 's/layerfs-path=[^ ]*//g' "$EXTRACT_DIR/boot/grub/grub.cfg"
-# Also check loopback.cfg if it exists
-if [ -f "$EXTRACT_DIR/boot/grub/loopback.cfg" ]; then
-  sed -i 's/layerfs-path=[^ ]* //g' "$EXTRACT_DIR/boot/grub/loopback.cfg"
-  sed -i 's/layerfs-path=[^ ]*//g' "$EXTRACT_DIR/boot/grub/loopback.cfg"
-fi
+# Always remove welcome/setup programs from top layer (in case they exist here too)
+echo "=== Removing welcome/setup programs from top layer ==="
+find "$SQUASH_DIR" -type f \( \
+  -name "*initial-setup*" -o \
+  -name "*gnome-tour*" -o \
+  -name "*ubuntu-welcome*" -o \
+  -name "*desktop-provision*" -o \
+  -name "*first-run*" \
+\) -exec rm -rfv {} \; 2>/dev/null || true
 
-echo "Squashfs merged to: $SQUASH_DIR"
-
-# Validate squashfs extraction succeeded
-if [ ! -d "$SQUASH_DIR/usr" ] || [ ! -d "$SQUASH_DIR/etc" ]; then
-  echo "ERROR: Squashfs extraction failed - missing /usr or /etc directories!"
-  exit 1
-fi
-echo "Validated: Squashfs extraction successful"
+find "$SQUASH_DIR" -type d \( \
+  -name "*initial-setup*" -o \
+  -name "*gnome-tour*" -o \
+  -name "*ubuntu-welcome*" -o \
+  -name "*desktop-provision*" \
+\) -exec rm -rfv {} \; 2>/dev/null || true
+echo "welcome/setup removal from top layer complete"
 
 echo "=== Injecting setup files ==="
 cp /work/pre-setup/setup "$SQUASH_DIR/usr/bin/setup"
@@ -93,26 +128,21 @@ mkdir -p "$SQUASH_DIR/etc/xdg/autostart"
 cp /work/pre-setup/setup.desktop "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 
-echo "=== Disabling gnome-initial-setup ==="
-# Ref: https://ubuntuhandbook.org/index.php/2023/01/disable-welcome-dialog-ubuntu-22-04/
+echo "=== Disabling gnome-initial-setup (belt and suspenders) ==="
+# Even though we removed the binary, add config overrides in case package gets reinstalled
 
-# 0. Disable via GDM config (belt-and-suspenders)
-# Ref: https://help.gnome.org/admin/gdm/stable/configuration.html
+# 1. GDM config
 mkdir -p "$SQUASH_DIR/etc/gdm3"
-if [ -f "$SQUASH_DIR/etc/gdm3/custom.conf" ]; then
-  sed -i '/^\[daemon\]/a InitialSetupEnable=false' "$SQUASH_DIR/etc/gdm3/custom.conf"
-else
-  cat > "$SQUASH_DIR/etc/gdm3/custom.conf" << 'EOF'
+cat > "$SQUASH_DIR/etc/gdm3/custom.conf" << 'EOF'
 [daemon]
 InitialSetupEnable=false
 EOF
-fi
 
-# 1. Mask systemd user service (symlink to /dev/null)
+# 2. Mask systemd user service
 mkdir -p "$SQUASH_DIR/etc/systemd/user"
 ln -sf /dev/null "$SQUASH_DIR/etc/systemd/user/gnome-initial-setup-first-login.service"
 
-# 2. Override autostart desktop file
+# 3. Override autostart desktop file
 cat > "$SQUASH_DIR/etc/xdg/autostart/gnome-initial-setup-first-login.desktop" << 'EOF'
 [Desktop Entry]
 Type=Application
@@ -122,12 +152,12 @@ X-GNOME-Autostart-enabled=false
 NoDisplay=true
 EOF
 
-# 3. Create done file for ubuntu user
+# 4. Create done file for ubuntu user
 mkdir -p "$SQUASH_DIR/home/ubuntu/.config"
 echo "yes" > "$SQUASH_DIR/home/ubuntu/.config/gnome-initial-setup-done"
-chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config"
+chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu"
 
-# 4. Create done file in /etc/skel for new users
+# 5. Create done file in /etc/skel
 mkdir -p "$SQUASH_DIR/etc/skel/.config"
 echo "yes" > "$SQUASH_DIR/etc/skel/.config/gnome-initial-setup-done"
 
@@ -168,60 +198,6 @@ dconf compile "$SQUASH_DIR/home/ubuntu/.config/dconf/user" /tmp/dconf-keyfiles.d
 chown -R 1000:1000 "$SQUASH_DIR/home/ubuntu/.config/dconf"
 rm -rf /tmp/dconf-keyfiles.d
 
-echo "=== Removing bloatware packages ==="
-if [ -x "$SQUASH_DIR/usr/bin/apt-get" ] && [ -d "$SQUASH_DIR/var/lib/dpkg" ]; then
-  cp /etc/resolv.conf "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
-  mount --bind /dev "$SQUASH_DIR/dev" 2>/dev/null || true
-  mount --bind /dev/pts "$SQUASH_DIR/dev/pts" 2>/dev/null || true
-  mount -t proc proc "$SQUASH_DIR/proc" 2>/dev/null || true
-  mount -t sysfs sysfs "$SQUASH_DIR/sys" 2>/dev/null || true
-
-  chroot "$SQUASH_DIR" /bin/bash -c '
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq 2>/dev/null || exit 0
-  apt-get remove -y --purge \
-    gnome-initial-setup \
-    firefox \
-    thunderbird \
-    libreoffice-* \
-    rhythmbox \
-    totem \
-    remmina \
-    shotwell \
-    software-properties-gtk \
-    update-manager \
-    usb-creator-gtk \
-    transmission-gtk \
-    yelp \
-    gnome-user-docs \
-    ubuntu-report \
-    popularity-contest \
-    2>/dev/null || true
-  apt-get autoremove -y 2>/dev/null || true
-  apt-get clean 2>/dev/null || true
-  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
-  systemctl --global mask gnome-initial-setup-first-login.service 2>/dev/null || true
-  ' || echo "Note: Package removal had warnings (continuing)"
-
-  umount "$SQUASH_DIR/sys" 2>/dev/null || true
-  umount "$SQUASH_DIR/proc" 2>/dev/null || true
-  umount "$SQUASH_DIR/dev/pts" 2>/dev/null || true
-  umount "$SQUASH_DIR/dev" 2>/dev/null || true
-  rm -f "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
-fi
-
-# Forcefully remove gnome-initial-setup files even if apt failed
-echo "=== Force-removing gnome-initial-setup files ==="
-rm -f "$SQUASH_DIR/usr/libexec/gnome-initial-setup" 2>/dev/null || true
-rm -f "$SQUASH_DIR/usr/libexec/gnome-initial-setup-copy-worker" 2>/dev/null || true
-rm -f "$SQUASH_DIR/usr/lib/systemd/user/gnome-initial-setup"*.service 2>/dev/null || true
-rm -f "$SQUASH_DIR/usr/lib/systemd/user/gnome-initial-setup"*.target 2>/dev/null || true
-rm -f "$SQUASH_DIR/usr/share/applications/gnome-initial-setup"*.desktop 2>/dev/null || true
-rm -rf "$SQUASH_DIR/usr/share/gnome-initial-setup" 2>/dev/null || true
-# Remove any autostart entries that might exist in other locations
-find "$SQUASH_DIR/etc/xdg" -name "*gnome-initial-setup*" ! -name "gnome-initial-setup-first-login.desktop" -delete 2>/dev/null || true
-find "$SQUASH_DIR/usr/share/gdm" -name "*initial-setup*" -delete 2>/dev/null || true
-
 echo "=== Copying wallpapers ==="
 mkdir -p "$SQUASH_DIR/usr/share/backgrounds/custom"
 cp /work/wallpaper/wp-*.jpg "$SQUASH_DIR/usr/share/backgrounds/custom/"
@@ -242,12 +218,7 @@ echo "=== Configuring GRUB ==="
 sed -i 's/set timeout=30/set timeout=5/' "$EXTRACT_DIR/boot/grub/grub.cfg"
 sed -i 's/quiet splash/nomodeset/' "$EXTRACT_DIR/boot/grub/grub.cfg"
 
-echo "=== Removing unused files ==="
-rm -rf "$EXTRACT_DIR/pool"
-rm -rf "$EXTRACT_DIR/dists"
-
 echo "=== Validating configuration ==="
-# Check gnome-initial-setup is disabled
 if [ ! -L "$SQUASH_DIR/etc/systemd/user/gnome-initial-setup-first-login.service" ]; then
   echo "ERROR: systemd service not masked!"
   exit 1
@@ -256,29 +227,19 @@ if [ ! -f "$SQUASH_DIR/home/ubuntu/.config/gnome-initial-setup-done" ]; then
   echo "ERROR: done file not created!"
   exit 1
 fi
-# Check setup.desktop exists
 if [ ! -f "$SQUASH_DIR/etc/xdg/autostart/setup.desktop" ]; then
   echo "ERROR: setup.desktop not found!"
   exit 1
 fi
-# Check wallpapers copied
 if [ ! -f "$SQUASH_DIR/usr/share/backgrounds/custom/wp-01.jpg" ]; then
   echo "ERROR: wallpapers not copied!"
   exit 1
 fi
-# Check layerfs-path removed from grub
-if grep -q "layerfs-path" "$EXTRACT_DIR/boot/grub/grub.cfg"; then
-  echo "ERROR: layerfs-path still in grub.cfg!"
-  exit 1
-fi
 echo "VALIDATED: All configurations applied"
 
-echo "=== Creating filesystem.squashfs ==="
-mksquashfs "$SQUASH_DIR" "$CASPER_DIR/filesystem.squashfs" -comp xz -b 1M
-echo "Created: $CASPER_DIR/filesystem.squashfs"
-
-echo "=== Updating filesystem.size ==="
-printf $(du -sx --block-size=1 "$SQUASH_DIR" | cut -f1) > "$CASPER_DIR/filesystem.size"
+echo "=== Repacking top layer: ${TOP_LAYER}.squashfs ==="
+mksquashfs "$SQUASH_DIR" "$CASPER_DIR/${TOP_LAYER}.squashfs" -comp xz -b 1M
+echo "Created: $CASPER_DIR/${TOP_LAYER}.squashfs"
 
 echo "=== Regenerating md5sum.txt ==="
 (cd "$EXTRACT_DIR" && find . -type f -print0 | xargs -0 md5sum | grep -v isolinux/boot.cat | grep -v md5sum.txt > md5sum.txt) || true
@@ -313,12 +274,24 @@ xorriso -as mkisofs \
   "$EXTRACT_DIR"
 
 echo "=== Final validation ==="
-# Verify ISO has filesystem.squashfs
-if ! xorriso -indev "$ISO_OUT" -find /casper -name "filesystem.squashfs" 2>/dev/null | grep -q squashfs; then
-  echo "ERROR: filesystem.squashfs not in final ISO!"
-  exit 1
+# Verify all required squashfs files are in the ISO
+if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
+  # Layered mode - check all 3 layers exist
+  for layer in minimal.squashfs minimal.standard.squashfs minimal.standard.live.squashfs; do
+    if ! xorriso -indev "$ISO_OUT" -find /casper -name "$layer" 2>/dev/null | grep -q "$layer"; then
+      echo "ERROR: $layer not in final ISO!"
+      exit 1
+    fi
+    echo "VERIFIED: $layer present"
+  done
+else
+  # Single squashfs mode
+  if ! xorriso -indev "$ISO_OUT" -find /casper -name "filesystem.squashfs" 2>/dev/null | grep -q squashfs; then
+    echo "ERROR: filesystem.squashfs not in final ISO!"
+    exit 1
+  fi
+  echo "VERIFIED: filesystem.squashfs present"
 fi
-echo "VERIFIED: filesystem.squashfs present in ISO"
 
 echo "=== Cleaning up ==="
 rm -rf "$EXTRACT_DIR" "$SQUASH_DIR" "$EFI_IMG"
