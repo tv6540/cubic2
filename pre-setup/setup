@@ -11,47 +11,78 @@ echo "=== Setup started at $(date) ==="
 
 # Activate ethernet FIRST before checking network
 # Intel e1000e NICs need interface cycle to trigger link negotiation
+# Ref: https://bugzilla.kernel.org/show_bug.cgi?id=205067
 activate_ethernet() {
   echo "Activating wired ethernet..."
-  local path iface
+  local path iface connected=0
+
+  # Collect all ethernet interfaces first
+  local interfaces=()
   for path in /sys/class/net/*/device; do
     [ -e "$path" ] || continue
     iface=$(basename "$(dirname "$path")")
     # Skip wireless, virtual, loopback
-    [[ "$iface" =~ ^(lo|wl|ww|vir|docker|br-|veth) ]] && continue
+    [[ "$iface" =~ ^(lo|wl|ww|vir|docker|br-|veth|tap|tun) ]] && continue
     [ -d "/sys/class/net/$iface/wireless" ] && continue
+    interfaces+=("$iface")
+  done
 
-    echo "  Found: $iface - cycling interface..."
+  if [ ${#interfaces[@]} -eq 0 ]; then
+    echo "  No ethernet interfaces found"
+    return 1
+  fi
+
+  # Try each interface
+  for iface in "${interfaces[@]}"; do
+    echo "  Trying: $iface"
+
+    # Step 1: Cycle interface DOWN->UP to reset PHY
+    echo "    Cycling interface..."
     sudo ip link set "$iface" down 2>/dev/null || true
     sleep 1
     sudo ip link set "$iface" up 2>/dev/null || true
 
-    # Restart auto-negotiation if ethtool available
-    command -v ethtool &>/dev/null && sudo ethtool -r "$iface" 2>/dev/null || true
+    # Step 2: Disable EEE (Energy Efficient Ethernet) - common fix for e1000e
+    # Ref: https://bbs.archlinux.org/viewtopic.php?id=159454
+    if command -v ethtool &>/dev/null; then
+      sudo ethtool --set-eee "$iface" eee off 2>/dev/null || true
+      sudo ethtool -r "$iface" 2>/dev/null || true  # Restart auto-negotiation
+    fi
 
-    # Wait for link (up to 10 seconds)
+    # Step 3: Wait for link (up to 15 seconds - Intel NICs can be slow)
+    # "6 seconds is just not enough for Intel NIC's to get configured on 1000 Mbps"
+    echo "    Waiting for link..."
     local i
-    for i in $(seq 1 10); do
+    for i in $(seq 1 15); do
       if [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ]; then
-        echo "  Link detected on $iface"
-        sudo nmcli device set "$iface" managed yes 2>/dev/null || true
-        nmcli device connect "$iface" 2>/dev/null || true
-        return 0
+        echo "    Link detected on $iface"
+        break
       fi
       sleep 1
     done
 
-    # Force NetworkManager to try even without carrier
-    echo "  No carrier, forcing NetworkManager..."
+    # Step 4: Tell NetworkManager to connect
     sudo nmcli device set "$iface" managed yes 2>/dev/null || true
     nmcli device connect "$iface" 2>/dev/null || true
-    sleep 2
 
-    if nmcli device status 2>/dev/null | grep -q "$iface.*connected"; then
-      echo "  Connected via $iface"
-      return 0
-    fi
+    # Step 5: Wait for DHCP (up to 10 seconds)
+    echo "    Waiting for IP..."
+    for i in $(seq 1 10); do
+      if nmcli device status 2>/dev/null | grep -q "$iface.*connected"; then
+        echo "    Connected via $iface"
+        connected=1
+        break 2  # Exit both loops
+      fi
+      sleep 1
+    done
+
+    echo "    Failed to connect on $iface"
   done
+
+  if [ $connected -eq 1 ]; then
+    return 0
+  fi
+
   echo "  No wired connection (will try WiFi)"
   return 1
 }
