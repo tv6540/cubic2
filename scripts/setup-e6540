@@ -6,63 +6,40 @@ echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
 pkill -f gnome-initial-setup 2>/dev/null || true
 
 echo -e "\n>>>> Activating wired ethernet"
-# Intel e1000e NICs need interface cycle to trigger link negotiation
-# Ref: https://bugzilla.kernel.org/show_bug.cgi?id=205067
 activate_ethernet() {
-  local path iface connected=0
+  local dev conn attempt
 
-  # Collect all ethernet interfaces
-  local interfaces=()
-  for path in /sys/class/net/*/device; do
-    [ -e "$path" ] || continue
-    iface=$(basename "$(dirname "$path")")
-    [[ "$iface" =~ ^(lo|wl|ww|vir|docker|br-|veth|tap|tun) ]] && continue
-    [ -d "/sys/class/net/$iface/wireless" ] && continue
-    interfaces+=("$iface")
-  done
+  dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
+  [ -z "$dev" ] && { echo "No ethernet device"; return 1; }
 
-  [ ${#interfaces[@]} -eq 0 ] && { echo "No ethernet interfaces"; return 1; }
+  echo "Found: $dev"
 
-  for iface in "${interfaces[@]}"; do
-    echo "Trying: $iface"
+  # Try up to 3 times with NM restart
+  for attempt in 1 2 3; do
+    echo "Attempt $attempt/3..."
 
-    # Cycle interface to reset PHY
-    sudo ip link set "$iface" down 2>/dev/null || true
-    sleep 1
-    sudo ip link set "$iface" up 2>/dev/null || true
-
-    # Disable EEE and restart auto-negotiation
-    if command -v ethtool &>/dev/null; then
-      sudo ethtool --set-eee "$iface" eee off 2>/dev/null || true
-      sudo ethtool -r "$iface" 2>/dev/null || true
+    # Try direct connect
+    if nmcli device connect "$dev" 2>/dev/null; then
+      echo "Connected!"
+      return 0
     fi
 
-    # Wait for link (15 seconds - Intel NICs are slow)
-    echo "  Waiting for link..."
-    local i
-    for i in $(seq 1 15); do
-      [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ] && break
-      sleep 1
-    done
+    # Try connection profile
+    conn=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ':.*ethernet' | cut -d: -f1 | head -1)
+    if [ -n "$conn" ] && nmcli connection up "$conn" 2>/dev/null; then
+      echo "Connected!"
+      return 0
+    fi
 
-    # Connect via NetworkManager
-    sudo nmcli device set "$iface" managed yes 2>/dev/null || true
-    nmcli device connect "$iface" 2>/dev/null || true
-
-    # Wait for DHCP
-    for i in $(seq 1 10); do
-      if nmcli device status 2>/dev/null | grep -q "$iface.*connected"; then
-        echo "  Connected via $iface"
-        connected=1
-        break 2
-      fi
-      sleep 1
-    done
-    echo "  Failed on $iface"
+    # Restart NM and retry (except on last attempt)
+    if [ $attempt -lt 3 ]; then
+      echo "Restarting NetworkManager..."
+      sudo systemctl restart NetworkManager
+      sleep 3
+    fi
   done
 
-  [ $connected -eq 1 ] && return 0
-  echo "No wired connection (WiFi may be available)"
+  echo "No wired connection"
   return 1
 }
 activate_ethernet

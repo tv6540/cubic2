@@ -2,37 +2,13 @@
 # Quick display/audio/network reset - run with: x
 
 echo -e ">>>> Activating wired ethernet"
-for path in /sys/class/net/*/device; do
-  [ -e "$path" ] || continue
-  iface=$(basename "$(dirname "$path")")
-  [[ "$iface" =~ ^(lo|wl|ww|vir|docker|br-|veth|tap|tun) ]] && continue
-  [ -d "/sys/class/net/$iface/wireless" ] && continue
-
-  echo "Cycling $iface..."
-  sudo ip link set "$iface" down 2>/dev/null; sleep 1
-  sudo ip link set "$iface" up 2>/dev/null
-
-  # Disable EEE and restart auto-negotiation (key fix for e1000e)
-  if command -v ethtool &>/dev/null; then
-    sudo ethtool --set-eee "$iface" eee off 2>/dev/null
-    sudo ethtool -r "$iface" 2>/dev/null
-  fi
-
-  # Wait up to 15 seconds for link (Intel NICs need time)
-  echo "  Waiting for link..."
-  for i in $(seq 1 15); do
-    [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ] && break
-    sleep 1
+dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
+if [ -n "$dev" ]; then
+  for attempt in 1 2 3; do
+    nmcli device connect "$dev" 2>/dev/null && { echo "Connected: $dev"; break; }
+    [ $attempt -lt 3 ] && { echo "Retry $attempt - restarting NM..."; sudo systemctl restart NetworkManager; sleep 2; }
   done
-
-  # Connect and wait for DHCP
-  sudo nmcli device set "$iface" managed yes 2>/dev/null
-  nmcli device connect "$iface" 2>/dev/null
-  for i in $(seq 1 10); do
-    nmcli device status 2>/dev/null | grep -q "$iface.*connected" && echo "$iface connected" && break 2
-    sleep 1
-  done
-done
+fi
 
 echo -e "\n>>>> Configuring displays"
 XRANDR_OUT=$(xrandr --current 2>/dev/null) || { echo "xrandr failed"; exit 1; }

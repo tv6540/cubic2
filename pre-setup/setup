@@ -9,116 +9,74 @@ LOG_FILE="$HOME/setup.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== Setup started at $(date) ==="
 
-# Activate ethernet FIRST before checking network
-# Intel e1000e NICs need interface cycle to trigger link negotiation
-# Ref: https://bugzilla.kernel.org/show_bug.cgi?id=205067
-activate_ethernet() {
-  echo "Activating wired ethernet..."
-  local path iface connected=0
+# Try to connect ethernet device
+try_ethernet_connect() {
+  local dev conn
 
-  # Collect all ethernet interfaces first
-  local interfaces=()
-  for path in /sys/class/net/*/device; do
-    [ -e "$path" ] || continue
-    iface=$(basename "$(dirname "$path")")
-    # Skip wireless, virtual, loopback
-    [[ "$iface" =~ ^(lo|wl|ww|vir|docker|br-|veth|tap|tun) ]] && continue
-    [ -d "/sys/class/net/$iface/wireless" ] && continue
-    interfaces+=("$iface")
-  done
+  dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
+  [ -z "$dev" ] && return 1
 
-  if [ ${#interfaces[@]} -eq 0 ]; then
-    echo "  No ethernet interfaces found"
-    return 1
-  fi
+  # Try direct connect first
+  nmcli device connect "$dev" 2>/dev/null && return 0
 
-  # Try each interface
-  for iface in "${interfaces[@]}"; do
-    echo "  Trying: $iface"
+  # Try connection profile
+  conn=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ':.*ethernet' | cut -d: -f1 | head -1)
+  [ -n "$conn" ] && nmcli connection up "$conn" 2>/dev/null && return 0
 
-    # Step 1: Cycle interface DOWN->UP to reset PHY
-    echo "    Cycling interface..."
-    sudo ip link set "$iface" down 2>/dev/null || true
-    sleep 1
-    sudo ip link set "$iface" up 2>/dev/null || true
-
-    # Step 2: Disable EEE (Energy Efficient Ethernet) - common fix for e1000e
-    # Ref: https://bbs.archlinux.org/viewtopic.php?id=159454
-    if command -v ethtool &>/dev/null; then
-      sudo ethtool --set-eee "$iface" eee off 2>/dev/null || true
-      sudo ethtool -r "$iface" 2>/dev/null || true  # Restart auto-negotiation
-    fi
-
-    # Step 3: Wait for link (up to 15 seconds - Intel NICs can be slow)
-    # "6 seconds is just not enough for Intel NIC's to get configured on 1000 Mbps"
-    echo "    Waiting for link..."
-    local i
-    for i in $(seq 1 15); do
-      if [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ]; then
-        echo "    Link detected on $iface"
-        break
-      fi
-      sleep 1
-    done
-
-    # Step 4: Tell NetworkManager to connect
-    sudo nmcli device set "$iface" managed yes 2>/dev/null || true
-    nmcli device connect "$iface" 2>/dev/null || true
-
-    # Step 5: Wait for DHCP (up to 10 seconds)
-    echo "    Waiting for IP..."
-    for i in $(seq 1 10); do
-      if nmcli device status 2>/dev/null | grep -q "$iface.*connected"; then
-        echo "    Connected via $iface"
-        connected=1
-        break 2  # Exit both loops
-      fi
-      sleep 1
-    done
-
-    echo "    Failed to connect on $iface"
-  done
-
-  if [ $connected -eq 1 ]; then
-    return 0
-  fi
-
-  echo "  No wired connection (will try WiFi)"
   return 1
 }
 
-check_online() {
-  local retries=0
-  local max_retries=360
+# Check if we're online
+is_online() {
+  ping -c 1 -W 2 github.com &>/dev/null
+}
 
-  while [ $retries -lt $max_retries ]; do
-    if ping -c 1 github.com &> /dev/null; then
-      echo "Online"
+# Main network activation loop
+# Handles: NM restart needed, router not yet on, cable plugged in late
+# Waits indefinitely until network is available
+activate_and_wait_for_network() {
+  local attempt=0
+
+  echo "Activating network..."
+
+  while true; do
+    # Check if already online
+    if is_online; then
+      echo "Online!"
       return 0
     fi
-    retries=$((retries + 1))
-    echo "Waiting for network... ($retries/$max_retries)"
+
+    # Every 12 attempts (60 sec), try to activate ethernet
+    # This handles: router was off, cable plugged in late, etc.
+    if [ $((attempt % 12)) -eq 0 ]; then
+      echo "Attempting ethernet connection..."
+
+      # Try simple connect first
+      if try_ethernet_connect; then
+        sleep 2
+        is_online && { echo "Online!"; return 0; }
+      fi
+
+      # Restart NM and try again
+      echo "Restarting NetworkManager..."
+      sudo systemctl restart NetworkManager
+      sleep 3
+
+      # Try connect again after restart
+      try_ethernet_connect
+      sleep 2
+      is_online && { echo "Online!"; return 0; }
+    fi
+
+    attempt=$((attempt + 1))
+    echo "Waiting for network... ($attempt)"
     sleep 5
   done
-
-  echo ""
-  echo "============================================"
-  echo "ERROR: No network after $max_retries attempts"
-  echo "============================================"
-  echo ""
-  echo "To recover:"
-  echo "  1. Connect to WiFi or plug in ethernet"
-  echo "  2. Run: setup"
-  echo ""
-  exit 1
 }
 
 main() {
-  # Activate ethernet BEFORE checking connectivity
-  activate_ethernet
-
-  echo "Checking internet connectivity..."
-  check_online
+  # Combined ethernet activation + network wait
+  activate_and_wait_for_network
 
   # Ensure git is installed
   if ! command -v git &> /dev/null; then

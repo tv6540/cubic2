@@ -149,6 +149,18 @@ mkdir -p "$SQUASH_DIR/etc/xdg/autostart"
 cp /work/pre-setup/setup.desktop "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 chmod 644 "$SQUASH_DIR/etc/xdg/autostart/setup.desktop"
 
+echo "=== Configuring NetworkManager to ignore carrier state ==="
+# Intel e1000e NICs often don't report carrier until connection is activated
+# This allows NetworkManager to activate connections even without carrier
+# Ref: https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/NetworkManager.conf.html
+mkdir -p "$SQUASH_DIR/etc/NetworkManager/conf.d"
+cat > "$SQUASH_DIR/etc/NetworkManager/conf.d/10-ignore-carrier.conf" << 'EOF'
+[main]
+# Allow activating ethernet connections even when no carrier is detected
+# This fixes Intel e1000e NICs that don't detect link until NM activates
+ignore-carrier=*
+EOF
+
 echo "=== Disabling gnome-initial-setup (belt and suspenders) ==="
 # Even though we removed the binary, add config overrides in case package gets reinstalled
 
