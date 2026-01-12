@@ -2,16 +2,26 @@
 # Quick display/audio/network reset - run with: x
 
 echo -e ">>>> Activating wired ethernet"
-for iface in /sys/class/net/e*/device; do
-  [ -e "$iface" ] || continue
-  iface=$(dirname "$iface"); iface=$(basename "$iface")
-  [[ "$iface" =~ ^(lo|wl|vir|docker|br-) ]] && continue
+for path in /sys/class/net/*/device; do
+  [ -e "$path" ] || continue
+  iface=$(basename "$(dirname "$path")")
+  [[ "$iface" =~ ^(lo|wl|ww|vir|docker|br-|veth) ]] && continue
+  [ -d "/sys/class/net/$iface/wireless" ] && continue
+
+  echo "Cycling $iface..."
+  sudo ip link set "$iface" down 2>/dev/null; sleep 1
   sudo ip link set "$iface" up 2>/dev/null
-  sleep 1
-  if [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ]; then
-    nmcli device connect "$iface" 2>/dev/null && echo "$iface connected"
-    break
-  fi
+  command -v ethtool &>/dev/null && sudo ethtool -r "$iface" 2>/dev/null
+
+  # Wait up to 5 seconds for link
+  for i in 1 2 3 4 5; do
+    [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ] && break
+    sleep 1
+  done
+
+  # Try to connect regardless of carrier
+  sudo nmcli device set "$iface" managed yes 2>/dev/null
+  nmcli device connect "$iface" 2>/dev/null && echo "$iface connected" && break
 done
 
 echo -e "\n>>>> Configuring displays"
