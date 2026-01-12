@@ -1,7 +1,17 @@
 #!/bin/bash
 # Quick display/audio reset - run with: x
 
-echo -e ">>>> Configuring displays"
+echo -e ">>>> Activating wired ethernet"
+ETH_IFACE=$(ip link | grep -E "^[0-9]+: (eno|enp|eth)" | head -1 | awk -F': ' '{print $2}')
+if [ -n "$ETH_IFACE" ]; then
+  sudo ip link set "$ETH_IFACE" up 2>/dev/null
+  sleep 1
+  if [ "$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null)" = "1" ]; then
+    nmcli device connect "$ETH_IFACE" 2>/dev/null && echo "$ETH_IFACE connected" || true
+  fi
+fi
+
+echo -e "\n>>>> Configuring displays"
 XRANDR_OUTPUT=$(xrandr --current)
 
 # Find connected external display (HDMI, DP, VGA, DVI)

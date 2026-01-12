@@ -5,6 +5,26 @@ set -e
 echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
 pkill -f gnome-initial-setup 2>/dev/null || true
 
+echo -e "\n>>>> Activating wired ethernet"
+# Intel e1000e NICs sometimes don't auto-negotiate on boot (power saving mode)
+# Force the interface up to trigger link detection
+ETH_IFACE=$(ip link | grep -E "^[0-9]+: (eno|enp|eth)" | head -1 | awk -F': ' '{print $2}')
+if [ -n "$ETH_IFACE" ]; then
+  echo "Found ethernet interface: $ETH_IFACE"
+  sudo ip link set "$ETH_IFACE" up
+  sleep 2  # Give time for link negotiation
+
+  # Check if carrier detected
+  if [ "$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null)" = "1" ]; then
+    echo "Link detected, connecting via NetworkManager..."
+    nmcli device connect "$ETH_IFACE" 2>/dev/null || true
+  else
+    echo "No cable detected on $ETH_IFACE (will use WiFi if available)"
+  fi
+else
+  echo "No ethernet interface found"
+fi
+
 echo -e "\n>>>> Configuring displays"
 # Auto-detect displays instead of hardcoding names/resolutions
 XRANDR_OUTPUT=$(xrandr --current)
