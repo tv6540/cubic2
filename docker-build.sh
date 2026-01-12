@@ -252,7 +252,7 @@ EOF
 
 echo "=== Configuring GRUB ==="
 sed -i 's/set timeout=30/set timeout=5/' "$EXTRACT_DIR/boot/grub/grub.cfg"
-sed -i 's/quiet splash/nomodeset/' "$EXTRACT_DIR/boot/grub/grub.cfg"
+sed -i 's/quiet splash/quiet/' "$EXTRACT_DIR/boot/grub/grub.cfg"
 
 echo "=== Validating configuration ==="
 if [ ! -L "$SQUASH_DIR/etc/systemd/user/gnome-initial-setup-first-login.service" ]; then

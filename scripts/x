@@ -1,11 +1,35 @@
 #!/bin/bash
 # Quick display/audio reset - run with: x
 
-echo -e ">>>> Setting HDMI-1 as primary at 1600x900"
-xrandr --output HDMI-1 --primary --mode 1600x900
+echo -e ">>>> Configuring displays"
+XRANDR_OUTPUT=$(xrandr --current)
 
-echo -e "\n>>>> Disabling built-in display (eDP-1)"
-xrandr --output eDP-1 --off
+# Find connected external display (HDMI, DP, VGA, DVI)
+EXTERNAL=$(echo "$XRANDR_OUTPUT" | grep -E "^(HDMI|DP|VGA|DVI)" | grep " connected" | head -1 | awk '{print $1}')
+
+# Find internal display (eDP, LVDS)
+INTERNAL=$(echo "$XRANDR_OUTPUT" | grep -E "^(eDP|LVDS)" | grep " connected" | head -1 | awk '{print $1}')
+
+if [ -n "$EXTERNAL" ]; then
+  # Get the preferred resolution (marked with + in xrandr output)
+  PREFERRED_MODE=$(echo "$XRANDR_OUTPUT" | sed -n "/^$EXTERNAL/,/^[A-Z]/p" | grep -E "^\s+[0-9]+x[0-9]+" | grep "+" | head -1 | awk '{print $1}')
+
+  if [ -n "$PREFERRED_MODE" ]; then
+    echo "Setting $EXTERNAL as primary at $PREFERRED_MODE"
+    xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED_MODE"
+  else
+    echo "Setting $EXTERNAL as primary (auto)"
+    xrandr --output "$EXTERNAL" --primary --auto
+  fi
+
+  if [ -n "$INTERNAL" ]; then
+    echo "Disabling internal display ($INTERNAL)"
+    xrandr --output "$INTERNAL" --off
+  fi
+else
+  echo "No external display found"
+  echo "$XRANDR_OUTPUT" | grep " connected"
+fi
 
 echo -e "\n>>>> Setting screen timeout to never"
 gsettings set org.gnome.desktop.session idle-delay 0
@@ -14,6 +38,9 @@ echo -e "\n>>>> Setting HDMI audio as default"
 HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
 if [ -n "$HDMI_SINK" ]; then
   pactl set-default-sink "$HDMI_SINK"
+  echo "Audio: $HDMI_SINK"
+else
+  echo "No HDMI audio sink found"
 fi
 
 echo -e "\n>>>> Done"
