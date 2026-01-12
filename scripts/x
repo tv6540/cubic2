@@ -1,56 +1,69 @@
 #!/bin/bash
-# Quick display/audio reset - run with: x
+# Quick display/audio/network reset - run with: x
 
 echo -e ">>>> Activating wired ethernet"
-ETH_IFACE=$(ip link | grep -E "^[0-9]+: (eno|enp|eth)" | head -1 | awk -F': ' '{print $2}')
-if [ -n "$ETH_IFACE" ]; then
-  sudo ip link set "$ETH_IFACE" up 2>/dev/null
+for iface in /sys/class/net/e*/device; do
+  [ -e "$iface" ] || continue
+  iface=$(dirname "$iface"); iface=$(basename "$iface")
+  [[ "$iface" =~ ^(lo|wl|vir|docker|br-) ]] && continue
+  sudo ip link set "$iface" up 2>/dev/null
   sleep 1
-  if [ "$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null)" = "1" ]; then
-    nmcli device connect "$ETH_IFACE" 2>/dev/null && echo "$ETH_IFACE connected" || true
+  if [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ]; then
+    nmcli device connect "$iface" 2>/dev/null && echo "$iface connected"
+    break
   fi
-fi
+done
 
 echo -e "\n>>>> Configuring displays"
-XRANDR_OUTPUT=$(xrandr --current)
+XRANDR_OUT=$(xrandr --current 2>/dev/null) || { echo "xrandr failed"; exit 1; }
 
-# Find connected external display (HDMI, DP, VGA, DVI)
-EXTERNAL=$(echo "$XRANDR_OUTPUT" | grep -E "^(HDMI|DP|VGA|DVI)" | grep " connected" | head -1 | awk '{print $1}')
+# Find external display (HDMI, DP, DisplayPort, VGA, DVI)
+EXTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|DisplayPort|VGA|DVI)" | grep " connected" | head -1 | awk '{print $1}')
 
-# Find internal display (eDP, LVDS)
-INTERNAL=$(echo "$XRANDR_OUTPUT" | grep -E "^(eDP|LVDS)" | grep " connected" | head -1 | awk '{print $1}')
+# Find internal display (eDP, LVDS, DSI)
+INTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(eDP|LVDS|DSI)" | grep " connected" | head -1 | awk '{print $1}')
 
 if [ -n "$EXTERNAL" ]; then
-  # Get the preferred resolution (marked with + in xrandr output)
-  PREFERRED_MODE=$(echo "$XRANDR_OUTPUT" | sed -n "/^$EXTERNAL/,/^[A-Z]/p" | grep -E "^\s+[0-9]+x[0-9]+" | grep "+" | head -1 | awk '{print $1}')
+  # Get preferred resolution
+  PREFERRED=$(echo "$XRANDR_OUT" | awk -v ext="$EXTERNAL" '
+    $1 == ext { found=1; next }
+    found && /^[A-Za-z]/ { exit }
+    found && /[0-9]+x[0-9]+/ && /\+|\*/ { print $1; exit }
+  ')
 
-  if [ -n "$PREFERRED_MODE" ]; then
-    echo "Setting $EXTERNAL as primary at $PREFERRED_MODE"
-    xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED_MODE"
+  if [ -n "$PREFERRED" ]; then
+    echo "Setting $EXTERNAL at $PREFERRED"
+    xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED" 2>/dev/null || \
+      xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || true
   else
-    echo "Setting $EXTERNAL as primary (auto)"
-    xrandr --output "$EXTERNAL" --primary --auto
+    echo "Setting $EXTERNAL (auto)"
+    xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || true
   fi
 
-  if [ -n "$INTERNAL" ]; then
-    echo "Disabling internal display ($INTERNAL)"
-    xrandr --output "$INTERNAL" --off
+  # Disable internal only if external is active
+  if [ -n "$INTERNAL" ] && xrandr --listactivemonitors 2>/dev/null | grep -q "$EXTERNAL"; then
+    echo "Disabling $INTERNAL"
+    xrandr --output "$INTERNAL" --off 2>/dev/null || true
   fi
 else
   echo "No external display found"
-  echo "$XRANDR_OUTPUT" | grep " connected"
+  [ -n "$INTERNAL" ] && xrandr --output "$INTERNAL" --auto 2>/dev/null
+  echo "$XRANDR_OUT" | grep " connected"
 fi
 
 echo -e "\n>>>> Setting screen timeout to never"
-gsettings set org.gnome.desktop.session idle-delay 0
+gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 
-echo -e "\n>>>> Setting HDMI audio as default"
-HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
-if [ -n "$HDMI_SINK" ]; then
-  pactl set-default-sink "$HDMI_SINK"
-  echo "Audio: $HDMI_SINK"
-else
-  echo "No HDMI audio sink found"
+echo -e "\n>>>> Setting audio output"
+if command -v pactl &>/dev/null; then
+  sleep 1  # Wait for audio to init after display change
+  HDMI_SINK=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
+  if [ -n "$HDMI_SINK" ]; then
+    pactl set-default-sink "$HDMI_SINK" && echo "Audio: $HDMI_SINK"
+  else
+    DEFAULT_SINK=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
+    [ -n "$DEFAULT_SINK" ] && echo "Audio: $DEFAULT_SINK (no HDMI)"
+  fi
 fi
 
 echo -e "\n>>>> Done"
