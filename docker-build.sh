@@ -155,8 +155,12 @@ cleanup_chroot() {
 }
 trap cleanup_chroot EXIT
 
+# Create mount points if they don't exist
+mkdir -p "$SQUASH_DIR/dev/pts" "$SQUASH_DIR/proc" "$SQUASH_DIR/sys"
+
 # Mount required filesystems for chroot
 mount --bind /dev "$SQUASH_DIR/dev"
+mkdir -p "$SQUASH_DIR/dev/pts"  # Recreate after bind mount
 mount --bind /dev/pts "$SQUASH_DIR/dev/pts"
 mount -t proc proc "$SQUASH_DIR/proc"
 mount -t sysfs sysfs "$SQUASH_DIR/sys"
