@@ -34,24 +34,13 @@ INTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(eDP|LVDS|DSI)" | grep " connected" | 
 echo "Detected: external=$EXTERNAL internal=$INTERNAL"
 
 if [ -n "$EXTERNAL" ]; then
-  # Get preferred resolution
-  PREFERRED=$(echo "$XRANDR_OUT" | awk -v ext="$EXTERNAL" '
-    $1 == ext { found=1; next }
-    found && /^[A-Za-z]/ { exit }
-    found && /[0-9]+x[0-9]+/ && /\+|\*/ { print $1; exit }
-  ')
-
-  if [ -n "$PREFERRED" ]; then
-    echo "Setting $EXTERNAL as primary at $PREFERRED"
-    if xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED" 2>&1; then
-      echo "  xrandr command succeeded"
-    else
-      echo "  Warning: Mode $PREFERRED failed, trying auto..."
-      xrandr --output "$EXTERNAL" --primary --auto 2>&1 || echo "  auto also failed"
-    fi
+  # Use 1600x900 for Intel Haswell HDMI - higher resolutions cause audio issues
+  echo "Setting $EXTERNAL as primary at 1600x900 (Haswell HDMI audio fix)"
+  if xrandr --output "$EXTERNAL" --primary --mode 1600x900 2>&1; then
+    echo "  xrandr command succeeded"
   else
-    echo "Setting $EXTERNAL as primary (auto)"
-    xrandr --output "$EXTERNAL" --primary --auto 2>&1 || echo "  Warning: auto failed"
+    echo "  Warning: 1600x900 failed, trying auto..."
+    xrandr --output "$EXTERNAL" --primary --auto 2>&1 || echo "  auto also failed"
   fi
 
   # Verify external is active

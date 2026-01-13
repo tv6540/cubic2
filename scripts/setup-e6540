@@ -119,26 +119,13 @@ configure_displays() {
   echo "Detected: external=$external internal=$internal"
 
   if [ -n "$external" ]; then
-    # Get preferred resolution (marked with + or * in xrandr output)
-    local preferred_mode
-    preferred_mode=$(echo "$xrandr_out" | awk -v ext="$external" '
-      $1 == ext { found=1; next }
-      found && /^[A-Za-z]/ { exit }
-      found && /[0-9]+x[0-9]+/ && /\+|\*/ { print $1; exit }
-    ')
-
-    # Configure external display
-    if [ -n "$preferred_mode" ]; then
-      echo "Setting $external as primary at $preferred_mode"
-      if xrandr --output "$external" --primary --mode "$preferred_mode" 2>&1; then
-        echo "  xrandr command succeeded"
-      else
-        echo "  Warning: Failed to set $preferred_mode, trying auto..."
-        xrandr --output "$external" --primary --auto 2>&1 || echo "  auto also failed"
-      fi
+    # Use 1600x900 for Intel Haswell HDMI - higher resolutions cause audio issues
+    echo "Setting $external as primary at 1600x900 (Haswell HDMI audio fix)"
+    if xrandr --output "$external" --primary --mode 1600x900 2>&1; then
+      echo "  xrandr command succeeded"
     else
-      echo "Setting $external as primary (auto, no preferred mode found)"
-      xrandr --output "$external" --primary --auto 2>&1 || echo "  Warning: auto failed"
+      echo "  Warning: 1600x900 failed, trying auto..."
+      xrandr --output "$external" --primary --auto 2>&1 || echo "  auto also failed"
     fi
 
     # Verify external is now active
