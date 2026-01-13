@@ -5,11 +5,108 @@ set -e
 echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
 pkill -f gnome-initial-setup 2>/dev/null || true
 
-echo -e "\n>>>> Setting HDMI-1 as primary at 1600x900"
-xrandr --output HDMI-1 --primary --mode 1600x900 || echo "Warning: HDMI-1 config failed, skipping"
+echo -e "\n>>>> Activating wired ethernet"
+activate_ethernet() {
+  local dev conn attempt
 
-echo -e "\n>>>> Disabling built-in display (eDP-1)"
-xrandr --output eDP-1 --off || echo "Warning: eDP-1 disable failed, skipping"
+  dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
+  [ -z "$dev" ] && { echo "No ethernet device"; return 1; }
+
+  echo "Found: $dev"
+
+  # Try up to 3 times with NM restart
+  for attempt in 1 2 3; do
+    echo "Attempt $attempt/3..."
+
+    # Try direct connect
+    if nmcli device connect "$dev" 2>/dev/null; then
+      echo "Connected!"
+      return 0
+    fi
+
+    # Try connection profile
+    conn=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ':.*ethernet' | cut -d: -f1 | head -1)
+    if [ -n "$conn" ] && nmcli connection up "$conn" 2>/dev/null; then
+      echo "Connected!"
+      return 0
+    fi
+
+    # Restart NM and retry (except on last attempt)
+    if [ $attempt -lt 3 ]; then
+      echo "Restarting NetworkManager..."
+      sudo systemctl restart NetworkManager
+      sleep 3
+    fi
+  done
+
+  echo "No wired connection"
+  return 1
+}
+activate_ethernet
+
+echo -e "\n>>>> Configuring displays"
+configure_displays() {
+  # Check if running Wayland or X11
+  if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+    # On GNOME Wayland, use gnome-randr if available, else xrandr via XWayland
+    if command -v gnome-randr &>/dev/null; then
+      RANDR_CMD="gnome-randr"
+    else
+      RANDR_CMD="xrandr"  # Falls back to XWayland compatibility
+    fi
+  else
+    RANDR_CMD="xrandr"
+  fi
+
+  local xrandr_out
+  xrandr_out=$(xrandr --current 2>/dev/null) || { echo "Warning: xrandr not available"; return 1; }
+
+  # Find connected external display (HDMI, DP, DisplayPort, VGA, DVI)
+  # Pattern covers: HDMI-1, HDMI-A-1, DP-1, DisplayPort-1, VGA-1, DVI-I-1, etc.
+  local external internal
+  external=$(echo "$xrandr_out" | grep -E "^(HDMI|DP|DisplayPort|VGA|DVI)" | grep " connected" | head -1 | awk '{print $1}')
+
+  # Find internal display (eDP, LVDS, DSI for tablets)
+  internal=$(echo "$xrandr_out" | grep -E "^(eDP|LVDS|DSI)" | grep " connected" | head -1 | awk '{print $1}')
+
+  if [ -n "$external" ]; then
+    # Get preferred resolution (marked with + or * in xrandr output)
+    local preferred_mode
+    preferred_mode=$(echo "$xrandr_out" | awk -v ext="$external" '
+      $1 == ext { found=1; next }
+      found && /^[A-Za-z]/ { exit }
+      found && /[0-9]+x[0-9]+/ && /\+|\*/ { print $1; exit }
+    ')
+
+    # Configure external display
+    if [ -n "$preferred_mode" ]; then
+      echo "Setting $external as primary at $preferred_mode"
+      if ! xrandr --output "$external" --primary --mode "$preferred_mode" 2>/dev/null; then
+        echo "Warning: Failed to set $preferred_mode, trying auto..."
+        xrandr --output "$external" --primary --auto 2>/dev/null || true
+      fi
+    else
+      echo "Setting $external as primary (auto)"
+      xrandr --output "$external" --primary --auto 2>/dev/null || true
+    fi
+
+    # Disable internal display only if external is working
+    if [ -n "$internal" ] && xrandr --listactivemonitors 2>/dev/null | grep -q "$external"; then
+      echo "Disabling internal display ($internal)"
+      xrandr --output "$internal" --off 2>/dev/null || echo "Warning: Could not disable $internal"
+    fi
+  else
+    echo "No external display detected"
+    # Ensure internal display is active as fallback
+    if [ -n "$internal" ]; then
+      echo "Keeping internal display ($internal) active"
+      xrandr --output "$internal" --auto 2>/dev/null || true
+    fi
+    echo "Connected displays:"
+    echo "$xrandr_out" | grep " connected" || echo "  (none detected)"
+  fi
+}
+configure_displays
 
 # Screen timeout handled in security section (5 min idle lock)
 # Video players auto-inhibit screensaver during playback
@@ -34,18 +131,35 @@ if ! grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf; then
   echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf
 fi
 
-echo -e "\n>>>> Setting HDMI audio as default"
-if command -v pactl &>/dev/null; then
-  HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
-  if [ -n "$HDMI_SINK" ]; then
-    pactl set-default-sink "$HDMI_SINK"
-    echo "Set default sink to: $HDMI_SINK"
-  else
-    echo "Warning: No HDMI sink found"
+echo -e "\n>>>> Setting audio output"
+configure_audio() {
+  if ! command -v pactl &>/dev/null; then
+    echo "Warning: pactl not available"
+    return 1
   fi
-else
-  echo "Warning: pactl not available, skipping HDMI audio setup"
-fi
+
+  # Wait a moment for audio to initialize after display changes
+  sleep 1
+
+  # Try HDMI/DisplayPort audio first (covers HDMI and DP)
+  local hdmi_sink
+  hdmi_sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
+
+  if [ -n "$hdmi_sink" ]; then
+    pactl set-default-sink "$hdmi_sink" && echo "Audio: $hdmi_sink" || echo "Warning: Failed to set $hdmi_sink"
+  else
+    # No HDMI sink - use first available sink (usually built-in speakers)
+    local default_sink
+    default_sink=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
+    if [ -n "$default_sink" ]; then
+      echo "No HDMI audio, using: $default_sink"
+      pactl set-default-sink "$default_sink" 2>/dev/null || true
+    else
+      echo "Warning: No audio sinks found"
+    fi
+  fi
+}
+configure_audio
 
 echo -e "\n>>>> Setting timezone to Pacific"
 sudo timedatectl set-timezone America/Los_Angeles
@@ -103,8 +217,10 @@ echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
 sudo chmod +x /usr/bin/x
 
-# Note: Dock favorites, dark mode, screen lock, and remote desktop settings
-# are pre-configured in the ISO via dconf database (docker-build.sh)
+echo -e "\n>>>> Setting dock favorites"
+# Set favorites at runtime after Chrome/VLC are installed (not in ISO build)
+# This prevents GNOME shell freeze when apps don't exist yet
+gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']"
 
 echo -e "\n>>>> Hardening security"
 # Enable firewall - deny all incoming, allow outgoing
