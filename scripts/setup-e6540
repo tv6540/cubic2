@@ -1,6 +1,30 @@
 #!/bin/bash
 set -e
 
+LOG_FILE="$HOME/setup.log"
+
+# Upload logs to dpaste on exit (success or failure) for diagnostics
+# Ref: https://dpaste.com/api/
+upload_logs() {
+  echo -e "\n>>>> Uploading logs for diagnostics..."
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "Log upload skipped: $LOG_FILE not found"
+    return
+  fi
+  if ! command -v curl &>/dev/null; then
+    echo "Log upload skipped: curl not available"
+    return
+  fi
+  LOG_URL=$(curl -s --max-time 15 -F "content=<$LOG_FILE" -F "expiry_days=1" https://dpaste.com/api/v2/ 2>/dev/null)
+  if [ -n "$LOG_URL" ]; then
+    echo "Log uploaded: $LOG_URL"
+    echo "Log URL: $LOG_URL" >> "$LOG_FILE"
+  else
+    echo "Log upload failed (dpaste unreachable or timeout)"
+  fi
+}
+trap upload_logs EXIT
+
 # Kill gnome-initial-setup if somehow still running (should be disabled at build time)
 echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
 pkill -f gnome-initial-setup 2>/dev/null || true
@@ -39,25 +63,14 @@ activate_ethernet() {
     fi
   done
 
-  echo "No wired connection"
+  echo "Ethernet failed: Could not connect after 3 attempts (nmcli device connect failed)"
   return 1
 }
-activate_ethernet || true  # Network already up (script was cloned), don't exit if this fails
+activate_ethernet || echo "Ethernet activation skipped (network already up from pre-setup)"
 
 echo -e "\n>>>> Configuring displays"
 configure_displays() {
-  # Check if running Wayland or X11
-  if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-    # On GNOME Wayland, use gnome-randr if available, else xrandr via XWayland
-    if command -v gnome-randr &>/dev/null; then
-      RANDR_CMD="gnome-randr"
-    else
-      RANDR_CMD="xrandr"  # Falls back to XWayland compatibility
-    fi
-  else
-    RANDR_CMD="xrandr"
-  fi
-
+  # Note: xrandr works on both X11 and Wayland (via XWayland) on Ubuntu 24.04
   local xrandr_out
   xrandr_out=$(xrandr --current 2>/dev/null) || { echo "Warning: xrandr not available"; return 1; }
 
@@ -100,7 +113,7 @@ configure_displays() {
     # Ensure internal display is active as fallback
     if [ -n "$internal" ]; then
       echo "Keeping internal display ($internal) active"
-      xrandr --output "$internal" --auto 2>/dev/null || true
+      xrandr --output "$internal" --auto 2>/dev/null || echo "Warning: Failed to configure $internal"
     fi
     echo "Connected displays:"
     echo "$xrandr_out" | grep " connected" || echo "  (none detected)"
@@ -117,18 +130,27 @@ WALLPAPERS=(/usr/share/backgrounds/custom/wp-*.jpg)
 shopt -u nullglob
 if [ ${#WALLPAPERS[@]} -gt 0 ]; then
   RANDOM_WP="${WALLPAPERS[RANDOM % ${#WALLPAPERS[@]}]}"
-  gsettings set org.gnome.desktop.background picture-uri "file://$RANDOM_WP"
-  gsettings set org.gnome.desktop.background picture-uri-dark "file://$RANDOM_WP"
-  gsettings set org.gnome.desktop.background picture-options "zoom"
-  echo "Applied wallpaper: $RANDOM_WP"
+  if gsettings set org.gnome.desktop.background picture-uri "file://$RANDOM_WP" 2>/dev/null && \
+     gsettings set org.gnome.desktop.background picture-uri-dark "file://$RANDOM_WP" 2>/dev/null && \
+     gsettings set org.gnome.desktop.background picture-options "zoom" 2>/dev/null; then
+    echo "Applied wallpaper: $RANDOM_WP"
+  else
+    echo "Warning: Failed to set wallpaper (gsettings error)"
+  fi
 else
   echo "Warning: No wallpapers found in /usr/share/backgrounds/custom/"
   ls -la /usr/share/backgrounds/custom/ 2>/dev/null || echo "Directory doesn't exist"
 fi
 
 echo -e "\n>>>> Ignoring lid switch"
-if ! grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf; then
-  echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf
+if grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf 2>/dev/null; then
+  echo "Lid switch already configured"
+else
+  if echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf >/dev/null; then
+    echo "Lid switch set to ignore"
+  else
+    echo "Warning: Failed to configure lid switch"
+  fi
 fi
 
 echo -e "\n>>>> Setting audio output"
@@ -153,7 +175,7 @@ configure_audio() {
     default_sink=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
     if [ -n "$default_sink" ]; then
       echo "No HDMI audio, using: $default_sink"
-      pactl set-default-sink "$default_sink" 2>/dev/null || true
+      pactl set-default-sink "$default_sink" 2>/dev/null || echo "Warning: Failed to set default sink"
     else
       echo "Warning: No audio sinks found"
     fi
@@ -162,7 +184,11 @@ configure_audio() {
 configure_audio || true  # Don't exit if audio config fails
 
 echo -e "\n>>>> Setting timezone to Pacific"
-sudo timedatectl set-timezone America/Los_Angeles
+if sudo timedatectl set-timezone America/Los_Angeles; then
+  echo "Timezone set to America/Los_Angeles"
+else
+  echo "Warning: Failed to set timezone"
+fi
 
 echo -e "\n>>>> Applying security updates and Chrome dependencies"
 # Disable locale generation (wastes 30+ seconds during package installs)
@@ -171,7 +197,11 @@ sudo ln -sf /bin/true /usr/sbin/locale-gen
 sudo mv /usr/bin/localedef /usr/bin/localedef.bak 2>/dev/null || true
 sudo ln -sf /bin/true /usr/bin/localedef
 
-sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+if sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+  echo "Package lists updated"
+else
+  echo "Warning: apt-get update failed (continuing anyway)"
+fi
 # Chrome required packages (from crash report + GUI deps) - includes security libs
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --only-upgrade \
   dpkg gpgv libapparmor1 libblkid1 libmount1 \
@@ -184,8 +214,17 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommen
 
 echo -e "\n>>>> Installing Google Chrome"
 cd /tmp
-wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y
+if wget -q -T 60 https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+  echo "Chrome downloaded"
+else
+  echo "ERROR: Failed to download Chrome (wget timeout or network error)"
+fi
+if sudo dpkg -i google-chrome-stable_current_amd64.deb 2>/dev/null; then
+  echo "Chrome installed"
+else
+  echo "Chrome dpkg failed, fixing dependencies..."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y
+fi
 rm -f google-chrome-stable_current_amd64.deb
 
 # Chrome sandbox works out of the box when installed via dpkg
@@ -206,7 +245,11 @@ install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube™ Ads"
 
 echo -e "\n>>>> Installing VLC"
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc
+if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc; then
+  echo "VLC installed"
+else
+  echo "Warning: VLC installation failed"
+fi
 
 # Restore locale tools after all package installs
 sudo rm -f /usr/sbin/locale-gen /usr/bin/localedef
@@ -214,37 +257,63 @@ sudo mv /usr/sbin/locale-gen.bak /usr/sbin/locale-gen 2>/dev/null || true
 sudo mv /usr/bin/localedef.bak /usr/bin/localedef 2>/dev/null || true
 
 echo -e "\n>>>> Installing quick reset command (x)"
-sudo cp /tmp/cubic2/scripts/x /usr/bin/x
-sudo chmod +x /usr/bin/x
+if sudo cp /tmp/cubic2/scripts/x /usr/bin/x && sudo chmod +x /usr/bin/x; then
+  echo "Quick reset command installed: /usr/bin/x"
+else
+  echo "Warning: Failed to install quick reset command"
+fi
 
 echo -e "\n>>>> Setting dock favorites"
 # Set favorites at runtime after Chrome/VLC are installed (not in ISO build)
 # This prevents GNOME shell freeze when apps don't exist yet
-gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']"
+if gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']" 2>/dev/null; then
+  echo "Dock favorites set"
+else
+  echo "Warning: Failed to set dock favorites (gsettings/dconf error)"
+fi
 
 echo -e "\n>>>> Hardening security"
 # Enable firewall - deny all incoming, allow outgoing
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw --force enable
+if sudo ufw default deny incoming >/dev/null && \
+   sudo ufw default allow outgoing >/dev/null && \
+   sudo ufw --force enable >/dev/null; then
+  echo "Firewall enabled (deny incoming, allow outgoing)"
+else
+  echo "Warning: Firewall configuration failed"
+fi
 
 # Disable SSH if present
-sudo systemctl disable ssh 2>/dev/null || true
-sudo systemctl stop ssh 2>/dev/null || true
+if sudo systemctl disable ssh 2>/dev/null && sudo systemctl stop ssh 2>/dev/null; then
+  echo "SSH disabled"
+else
+  echo "SSH not present or already disabled"
+fi
 
 # Disable Bluetooth (attack surface)
-sudo systemctl disable bluetooth 2>/dev/null || true
-sudo systemctl stop bluetooth 2>/dev/null || true
+if sudo systemctl disable bluetooth 2>/dev/null && sudo systemctl stop bluetooth 2>/dev/null; then
+  echo "Bluetooth disabled"
+else
+  echo "Bluetooth not present or already disabled"
+fi
 
 # Remount USB as read-only to prevent malware persistence
 USB_DEVICE=$(mount | grep /cdrom | awk '{print $1}')
 if [ -n "$USB_DEVICE" ]; then
-  sudo mount -o remount,ro /cdrom 2>/dev/null || true
-  echo "USB remounted read-only"
+  if sudo mount -o remount,ro /cdrom 2>/dev/null; then
+    echo "USB remounted read-only"
+  else
+    echo "Warning: Failed to remount USB as read-only"
+  fi
+else
+  echo "No USB mount point found at /cdrom"
 fi
 
 # Disable fwupd to prevent firmware modifications
-sudo systemctl mask fwupd 2>/dev/null || true
+if sudo systemctl mask fwupd >/dev/null 2>&1; then
+  echo "Firmware updates disabled (fwupd masked)"
+else
+  echo "Warning: Failed to mask fwupd"
+fi
 
 echo -e "\n>>>> Cleaning up"
 rm -rf /tmp/cubic2

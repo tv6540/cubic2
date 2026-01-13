@@ -4,10 +4,18 @@
 echo -e ">>>> Activating wired ethernet"
 dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
 if [ -n "$dev" ]; then
+  connected=false
   for attempt in 1 2 3; do
-    nmcli device connect "$dev" 2>/dev/null && { echo "Connected: $dev"; break; }
+    if nmcli device connect "$dev" 2>/dev/null; then
+      echo "Connected: $dev"
+      connected=true
+      break
+    fi
     [ $attempt -lt 3 ] && { echo "Retry $attempt - restarting NM..."; sudo systemctl restart NetworkManager; sleep 2; }
   done
+  [ "$connected" = false ] && echo "Ethernet failed: Could not connect $dev after 3 attempts"
+else
+  echo "No ethernet device found"
 fi
 
 echo -e "\n>>>> Configuring displays"
@@ -29,36 +37,55 @@ if [ -n "$EXTERNAL" ]; then
 
   if [ -n "$PREFERRED" ]; then
     echo "Setting $EXTERNAL at $PREFERRED"
-    xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED" 2>/dev/null || \
-      xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || true
+    if ! xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED" 2>/dev/null; then
+      echo "Warning: Mode $PREFERRED failed, trying auto..."
+      xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || echo "Warning: Failed to configure $EXTERNAL"
+    fi
   else
-    echo "Setting $EXTERNAL (auto)"
-    xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || true
+    echo "Setting $EXTERNAL (auto, no preferred mode found)"
+    xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || echo "Warning: Failed to configure $EXTERNAL"
   fi
 
   # Disable internal only if external is active
   if [ -n "$INTERNAL" ] && xrandr --listactivemonitors 2>/dev/null | grep -q "$EXTERNAL"; then
     echo "Disabling $INTERNAL"
-    xrandr --output "$INTERNAL" --off 2>/dev/null || true
+    xrandr --output "$INTERNAL" --off 2>/dev/null || echo "Warning: Could not disable $INTERNAL"
   fi
 else
   echo "No external display found"
-  [ -n "$INTERNAL" ] && xrandr --output "$INTERNAL" --auto 2>/dev/null
-  echo "$XRANDR_OUT" | grep " connected"
+  if [ -n "$INTERNAL" ]; then
+    xrandr --output "$INTERNAL" --auto 2>/dev/null || echo "Warning: Failed to configure $INTERNAL"
+  fi
+  echo "Connected displays:"
+  echo "$XRANDR_OUT" | grep " connected" || echo "  (none)"
 fi
 
 echo -e "\n>>>> Setting screen timeout to never"
-gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+if gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null; then
+  echo "Screen timeout disabled"
+else
+  echo "Warning: Failed to set screen timeout (gsettings error)"
+fi
 
 echo -e "\n>>>> Setting audio output"
-if command -v pactl &>/dev/null; then
+if ! command -v pactl &>/dev/null; then
+  echo "Warning: pactl not available, skipping audio config"
+else
   sleep 1  # Wait for audio to init after display change
   HDMI_SINK=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
   if [ -n "$HDMI_SINK" ]; then
-    pactl set-default-sink "$HDMI_SINK" && echo "Audio: $HDMI_SINK"
+    if pactl set-default-sink "$HDMI_SINK" 2>/dev/null; then
+      echo "Audio: $HDMI_SINK"
+    else
+      echo "Warning: Failed to set HDMI audio sink"
+    fi
   else
     DEFAULT_SINK=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
-    [ -n "$DEFAULT_SINK" ] && echo "Audio: $DEFAULT_SINK (no HDMI)"
+    if [ -n "$DEFAULT_SINK" ]; then
+      echo "Audio: $DEFAULT_SINK (no HDMI sink found)"
+    else
+      echo "Warning: No audio sinks available"
+    fi
   fi
 fi
 
