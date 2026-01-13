@@ -21,11 +21,17 @@ fi
 echo -e "\n>>>> Configuring displays"
 XRANDR_OUT=$(xrandr --current 2>/dev/null) || { echo "xrandr failed"; exit 1; }
 
+# Log initial state
+echo "Current display state:"
+echo "$XRANDR_OUT" | grep -E "^[A-Za-z].*connected" || echo "  (none detected)"
+
 # Find external display (HDMI, DP, DisplayPort, VGA, DVI)
 EXTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|DisplayPort|VGA|DVI)" | grep " connected" | head -1 | awk '{print $1}')
 
 # Find internal display (eDP, LVDS, DSI)
 INTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(eDP|LVDS|DSI)" | grep " connected" | head -1 | awk '{print $1}')
+
+echo "Detected: external=$EXTERNAL internal=$INTERNAL"
 
 if [ -n "$EXTERNAL" ]; then
   # Get preferred resolution
@@ -36,21 +42,53 @@ if [ -n "$EXTERNAL" ]; then
   ')
 
   if [ -n "$PREFERRED" ]; then
-    echo "Setting $EXTERNAL at $PREFERRED"
-    if ! xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED" 2>/dev/null; then
-      echo "Warning: Mode $PREFERRED failed, trying auto..."
-      xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || echo "Warning: Failed to configure $EXTERNAL"
+    echo "Setting $EXTERNAL as primary at $PREFERRED"
+    if xrandr --output "$EXTERNAL" --primary --mode "$PREFERRED" 2>&1; then
+      echo "  xrandr command succeeded"
+    else
+      echo "  Warning: Mode $PREFERRED failed, trying auto..."
+      xrandr --output "$EXTERNAL" --primary --auto 2>&1 || echo "  auto also failed"
     fi
   else
-    echo "Setting $EXTERNAL (auto, no preferred mode found)"
-    xrandr --output "$EXTERNAL" --primary --auto 2>/dev/null || echo "Warning: Failed to configure $EXTERNAL"
+    echo "Setting $EXTERNAL as primary (auto)"
+    xrandr --output "$EXTERNAL" --primary --auto 2>&1 || echo "  Warning: auto failed"
   fi
 
-  # Disable internal only if external is active
-  if [ -n "$INTERNAL" ] && xrandr --listactivemonitors 2>/dev/null | grep -q "$EXTERNAL"; then
-    echo "Disabling $INTERNAL"
-    xrandr --output "$INTERNAL" --off 2>/dev/null || echo "Warning: Could not disable $INTERNAL"
+  # Verify external is active
+  if ! xrandr --listactivemonitors 2>/dev/null | grep -q "$EXTERNAL"; then
+    echo "ERROR: $EXTERNAL not active after configuration!"
   fi
+
+  # Disable internal display with retries
+  if [ -n "$INTERNAL" ]; then
+    echo "Disabling internal display ($INTERNAL)..."
+    disabled=false
+    for attempt in 1 2 3 4 5; do
+      if ! xrandr --listactivemonitors 2>/dev/null | grep -q "$INTERNAL"; then
+        echo "  Internal display disabled (attempt $attempt)"
+        disabled=true
+        break
+      fi
+      echo "  Attempt $attempt: disabling $INTERNAL..."
+      xrandr --output "$INTERNAL" --off 2>&1 || true
+      sleep 1
+    done
+    if [ "$disabled" = false ]; then
+      # Disable failed - try mirroring as fallback (ensures Activities shows on TV)
+      echo "  Disable failed, trying mirror mode as fallback..."
+      if xrandr --output "$INTERNAL" --same-as "$EXTERNAL" --auto 2>&1; then
+        echo "  Mirror mode enabled ($INTERNAL mirrors $EXTERNAL)"
+        echo "  Note: Both screens show same content now"
+      else
+        echo "  WARNING: Could not disable or mirror $INTERNAL"
+        echo "  Windows key may show blank (Activities on wrong display)"
+      fi
+    fi
+  fi
+
+  # Final state
+  echo "Final display state:"
+  xrandr --listactivemonitors 2>/dev/null || echo "  (could not list monitors)"
 else
   echo "No external display found"
   if [ -n "$INTERNAL" ]; then
@@ -67,22 +105,38 @@ else
   echo "Warning: Failed to set screen timeout (gsettings error)"
 fi
 
-echo -e "\n>>>> Setting audio output"
+echo -e "\n>>>> Setting HDMI audio output"
 if ! command -v pactl &>/dev/null; then
   echo "Warning: pactl not available, skipping audio config"
+  echo "Try: sudo apt install pulseaudio-utils"
 else
   sleep 1  # Wait for audio to init after display change
-  HDMI_SINK=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
+  echo "Available sinks:"
+  pactl list short sinks 2>/dev/null || echo "  (none)"
+
+  # Use same approach as cubic v1 - grep for hdmi, use pacmd
+  HDMI_SINK=$(pactl list short sinks 2>/dev/null | grep -i hdmi | head -1 | awk '{print $2}')
   if [ -n "$HDMI_SINK" ]; then
-    if pactl set-default-sink "$HDMI_SINK" 2>/dev/null; then
-      echo "Audio: $HDMI_SINK"
+    echo "Found HDMI sink: $HDMI_SINK"
+
+    # Log audio card info for diagnostics
+    echo "Audio cards:"
+    pactl list short cards 2>/dev/null || echo "  (none)"
+
+    # Set default sink (same as cubic v1)
+    if pacmd set-default-sink "$HDMI_SINK" 2>/dev/null; then
+      echo "HDMI audio set successfully (pacmd)"
+    elif pactl set-default-sink "$HDMI_SINK" 2>/dev/null; then
+      echo "HDMI audio set successfully (pactl)"
     else
       echo "Warning: Failed to set HDMI audio sink"
     fi
   else
     DEFAULT_SINK=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
     if [ -n "$DEFAULT_SINK" ]; then
-      echo "Audio: $DEFAULT_SINK (no HDMI sink found)"
+      echo "No HDMI sink found, using: $DEFAULT_SINK"
+      pacmd set-default-sink "$DEFAULT_SINK" 2>/dev/null || \
+        pactl set-default-sink "$DEFAULT_SINK" 2>/dev/null || true
     else
       echo "Warning: No audio sinks available"
     fi

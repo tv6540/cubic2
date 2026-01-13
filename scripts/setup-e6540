@@ -104,6 +104,10 @@ configure_displays() {
   local xrandr_out
   xrandr_out=$(xrandr --current 2>/dev/null) || { echo "Warning: xrandr not available"; return 1; }
 
+  # Log initial display state for diagnostics
+  echo "Initial display state:"
+  echo "$xrandr_out" | grep -E "^[A-Za-z].*connected" || echo "  (no displays detected)"
+
   # Find connected external display (HDMI, DP, DisplayPort, VGA, DVI)
   # Pattern covers: HDMI-1, HDMI-A-1, DP-1, DisplayPort-1, VGA-1, DVI-I-1, etc.
   local external internal
@@ -111,6 +115,8 @@ configure_displays() {
 
   # Find internal display (eDP, LVDS, DSI for tablets)
   internal=$(echo "$xrandr_out" | grep -E "^(eDP|LVDS|DSI)" | grep " connected" | head -1 | awk '{print $1}')
+
+  echo "Detected: external=$external internal=$internal"
 
   if [ -n "$external" ]; then
     # Get preferred resolution (marked with + or * in xrandr output)
@@ -124,35 +130,82 @@ configure_displays() {
     # Configure external display
     if [ -n "$preferred_mode" ]; then
       echo "Setting $external as primary at $preferred_mode"
-      if ! xrandr --output "$external" --primary --mode "$preferred_mode" 2>/dev/null; then
-        echo "Warning: Failed to set $preferred_mode, trying auto..."
-        xrandr --output "$external" --primary --auto 2>/dev/null || true
+      if xrandr --output "$external" --primary --mode "$preferred_mode" 2>&1; then
+        echo "  xrandr command succeeded"
+      else
+        echo "  Warning: Failed to set $preferred_mode, trying auto..."
+        xrandr --output "$external" --primary --auto 2>&1 || echo "  auto also failed"
       fi
     else
-      echo "Setting $external as primary (auto)"
-      xrandr --output "$external" --primary --auto 2>/dev/null || true
+      echo "Setting $external as primary (auto, no preferred mode found)"
+      xrandr --output "$external" --primary --auto 2>&1 || echo "  Warning: auto failed"
     fi
 
-    # Disable internal display only if external is working
-    if [ -n "$internal" ] && xrandr --listactivemonitors 2>/dev/null | grep -q "$external"; then
-      echo "Disabling internal display ($internal) in background..."
-      # Spawn background daemon that retries until internal display is off (max 5 min)
-      (
-        attempts=0
-        max_attempts=100  # 100 * 3s = 5 minutes
-        while xrandr --listactivemonitors 2>/dev/null | grep -q "$internal"; do
-          xrandr --output "$internal" --off 2>/dev/null
-          attempts=$((attempts + 1))
-          if [ $attempts -ge $max_attempts ]; then
-            echo "Warning: Could not disable $internal after 5 minutes" >> "$LOG_FILE"
-            break
-          fi
-          sleep 3
-        done
-        [ $attempts -lt $max_attempts ] && echo "Internal display ($internal) disabled" >> "$LOG_FILE"
-      ) &
-      disown
+    # Verify external is now active
+    local active_monitors
+    active_monitors=$(xrandr --listactivemonitors 2>/dev/null)
+    echo "Active monitors after setting primary:"
+    echo "$active_monitors"
+
+    if ! echo "$active_monitors" | grep -q "$external"; then
+      echo "ERROR: $external not active after configuration!"
+      return 1
     fi
+
+    # Disable internal display - try synchronously first with retries
+    if [ -n "$internal" ]; then
+      echo "Disabling internal display ($internal)..."
+      local attempt disabled=false
+      for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        if ! xrandr --listactivemonitors 2>/dev/null | grep -q "$internal"; then
+          echo "  Internal display disabled (attempt $attempt)"
+          disabled=true
+          break
+        fi
+        echo "  Attempt $attempt: disabling $internal..."
+        xrandr --output "$internal" --off 2>&1 || true
+        sleep 2
+      done
+
+      if [ "$disabled" = false ]; then
+        # Disable failed - try mirroring as fallback (ensures Activities shows on TV)
+        echo "  Internal display still active, trying mirror mode as fallback..."
+        if xrandr --output "$internal" --same-as "$external" --auto 2>&1; then
+          echo "  Mirror mode enabled ($internal mirrors $external)"
+          echo "  Note: Both screens show same content now"
+        else
+          echo "  Mirror mode failed, spawning background daemon to keep trying disable..."
+          (
+            attempts=0
+            max_attempts=100  # 100 * 3s = 5 minutes
+            while xrandr --listactivemonitors 2>/dev/null | grep -q "$internal"; do
+              # Try disable first
+              if xrandr --output "$internal" --off 2>/dev/null; then
+                sleep 1
+                if ! xrandr --listactivemonitors 2>/dev/null | grep -q "$internal"; then
+                  echo "Internal display ($internal) disabled by background daemon" >> "$LOG_FILE"
+                  break
+                fi
+              fi
+              # Try mirror as fallback
+              xrandr --output "$internal" --same-as "$external" --auto 2>/dev/null && \
+                echo "Mirror mode enabled by background daemon" >> "$LOG_FILE" && break
+              attempts=$((attempts + 1))
+              if [ $attempts -ge $max_attempts ]; then
+                echo "Warning: Could not disable or mirror $internal after 5 minutes" >> "$LOG_FILE"
+                break
+              fi
+              sleep 3
+            done
+          ) &
+          disown
+        fi
+      fi
+    fi
+
+    # Final verification
+    echo "Final display state:"
+    xrandr --listactivemonitors 2>/dev/null || echo "  (could not list monitors)"
   else
     echo "No external display detected"
     # Ensure internal display is active as fallback
@@ -198,50 +251,7 @@ else
   fi
 fi
 
-echo -e "\n>>>> Setting audio output in background..."
-# Spawn background daemon that waits for PulseAudio and configures HDMI audio (max 5 min)
-(
-  attempts=0
-  max_attempts=150  # 150 * 2s = 5 minutes for PulseAudio wait
-
-  # Wait for PulseAudio to be ready
-  while ! pactl info &>/dev/null; do
-    attempts=$((attempts + 1))
-    if [ $attempts -ge $max_attempts ]; then
-      echo "Warning: PulseAudio not available after 5 minutes" >> "$LOG_FILE"
-      exit 1
-    fi
-    sleep 2
-  done
-
-  # Try to set HDMI audio, with fallback to default sink
-  attempts=0
-  max_attempts=100  # 100 * 3s = 5 minutes
-  while true; do
-    hdmi_sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
-    default_sink=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
-
-    # Try HDMI first
-    if [ -n "$hdmi_sink" ] && pactl set-default-sink "$hdmi_sink" 2>/dev/null; then
-      echo "Audio configured: $hdmi_sink" >> "$LOG_FILE"
-      break
-    fi
-
-    # Fall back to default sink
-    if [ -n "$default_sink" ] && pactl set-default-sink "$default_sink" 2>/dev/null; then
-      echo "Audio configured: $default_sink (no HDMI)" >> "$LOG_FILE"
-      break
-    fi
-
-    attempts=$((attempts + 1))
-    if [ $attempts -ge $max_attempts ]; then
-      echo "Warning: Could not configure audio after 5 minutes" >> "$LOG_FILE"
-      break
-    fi
-    sleep 3
-  done
-) &
-disown
+# Audio will be configured after pulseaudio-utils is installed (see below)
 
 echo -e "\n>>>> Setting timezone to Pacific"
 if sudo timedatectl set-timezone America/Los_Angeles; then
@@ -262,7 +272,14 @@ if sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
 else
   echo "Warning: apt-get update failed (continuing anyway)"
 fi
-# Chrome required packages (from crash report + GUI deps) - includes security libs
+# Install pulseaudio-utils if not pre-installed in ISO
+if ! command -v pactl &>/dev/null; then
+  echo "Installing pulseaudio-utils..."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pulseaudio-utils 2>/dev/null || true
+else
+  echo "pulseaudio-utils already installed"
+fi
+# Security updates
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --only-upgrade \
   dpkg gpgv libapparmor1 libblkid1 libmount1 \
   libpam-modules libpam-modules-bin libpango-1.0-0 libpangocairo-1.0-0 \
@@ -308,10 +325,46 @@ install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtub
 launch_chrome || true
 
 echo -e "\n>>>> Installing VLC"
-if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc; then
-  echo "VLC installed"
+if command -v vlc &>/dev/null; then
+  echo "VLC already installed"
 else
-  echo "Warning: VLC installation failed"
+  if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc; then
+    echo "VLC installed"
+  else
+    echo "Warning: VLC installation failed"
+  fi
+fi
+
+echo -e "\n>>>> Setting HDMI audio output"
+# Use pacmd like cubic v1 - this runs synchronously after pulseaudio-utils is installed
+if command -v pactl &>/dev/null; then
+  echo "Available audio sinks:"
+  pactl list short sinks 2>/dev/null || echo "  (none listed)"
+
+  # Get HDMI sink name (same approach as cubic v1)
+  HDMI_SINK=$(pactl list short sinks 2>/dev/null | grep -i hdmi | head -1 | awk '{print $2}')
+
+  if [ -n "$HDMI_SINK" ]; then
+    echo "Found HDMI sink: $HDMI_SINK"
+
+    # Log audio card info for diagnostics (helps debug choppy audio issues)
+    echo "Audio card info:"
+    pactl list short cards 2>/dev/null || echo "  (none)"
+
+    # Set default sink (same as cubic v1)
+    if pacmd set-default-sink "$HDMI_SINK" 2>/dev/null; then
+      echo "HDMI audio set successfully"
+    else
+      echo "Warning: pacmd set-default-sink failed, trying pactl..."
+      pactl set-default-sink "$HDMI_SINK" 2>/dev/null || echo "Warning: pactl also failed"
+    fi
+  else
+    echo "Warning: No HDMI audio sink found"
+    echo "Available sinks:"
+    pactl list short sinks 2>/dev/null | head -5
+  fi
+else
+  echo "Warning: pactl not available (pulseaudio-utils not installed?)"
 fi
 
 # Restore locale tools after all package installs

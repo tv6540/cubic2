@@ -140,6 +140,63 @@ EOF
 
 echo "welcome/setup removal from top layer complete"
 
+echo "=== Pre-installing packages (git, curl, vlc, pulseaudio-utils) ==="
+# Use chroot to install packages into the squashfs filesystem
+# This significantly reduces first-boot setup time
+
+# Cleanup function for chroot mounts (called on exit or error)
+cleanup_chroot() {
+  echo "Cleaning up chroot mounts..."
+  umount "$SQUASH_DIR/sys" 2>/dev/null || true
+  umount "$SQUASH_DIR/proc" 2>/dev/null || true
+  umount "$SQUASH_DIR/dev/pts" 2>/dev/null || true
+  umount "$SQUASH_DIR/dev" 2>/dev/null || true
+  rm -f "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
+}
+trap cleanup_chroot EXIT
+
+# Mount required filesystems for chroot
+mount --bind /dev "$SQUASH_DIR/dev"
+mount --bind /dev/pts "$SQUASH_DIR/dev/pts"
+mount -t proc proc "$SQUASH_DIR/proc"
+mount -t sysfs sysfs "$SQUASH_DIR/sys"
+
+# Copy DNS resolution for network access
+cp /etc/resolv.conf "$SQUASH_DIR/etc/resolv.conf"
+
+# Install packages inside chroot
+chroot "$SQUASH_DIR" /bin/bash << 'CHROOT_EOF'
+export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
+
+echo "Updating package lists..."
+apt-get update -qq
+
+echo "Installing git, curl, vlc, pulseaudio-utils..."
+apt-get install -y -qq --no-install-recommends git curl vlc pulseaudio-utils
+
+echo "Cleaning up apt cache..."
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+rm -rf /var/cache/apt/archives/*
+
+echo "Package installation complete"
+CHROOT_EOF
+
+# Unmount chroot filesystems (also handled by trap, but do explicitly for clarity)
+umount "$SQUASH_DIR/sys" 2>/dev/null || true
+umount "$SQUASH_DIR/proc" 2>/dev/null || true
+umount "$SQUASH_DIR/dev/pts" 2>/dev/null || true
+umount "$SQUASH_DIR/dev" 2>/dev/null || true
+
+# Remove resolv.conf (will be regenerated at boot)
+rm -f "$SQUASH_DIR/etc/resolv.conf"
+
+# Clear the chroot cleanup trap now that we're done
+trap - EXIT
+
+echo "Pre-installed packages complete"
+
 echo "=== Injecting setup files ==="
 cp /work/pre-setup/setup "$SQUASH_DIR/usr/bin/setup"
 chmod 755 "$SQUASH_DIR/usr/bin/setup"
