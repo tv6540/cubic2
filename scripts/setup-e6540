@@ -46,8 +46,7 @@ launch_chrome() {
       --no-first-run \
       --no-default-browser-check \
       --disable-session-crashed-bubble \
-      --no-sandbox \
-      --start-fullscreen \
+      --start-maximized \
       "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/"
     echo "Chrome launched via systemd"
   else
@@ -58,6 +57,59 @@ launch_chrome() {
 # Kill gnome-initial-setup if somehow still running (should be disabled at build time)
 echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
 pkill -f gnome-initial-setup 2>/dev/null || true
+
+echo -e "\n>>>> Mounting internal drives"
+# Mount all internal drives (exclude USB/removable and live USB at /cdrom)
+# Wrapped in subshell to ensure errors don't stop setup
+FIRST_MOUNT=""
+(
+  set +e  # Disable exit-on-error for this section
+  while read -r dev; do
+    # Skip if no device found
+    [ -z "$dev" ] && continue
+
+    # Get device info
+    devpath="/dev/$dev"
+
+    # Skip if already mounted
+    if mount | grep -q "^$devpath" 2>/dev/null; then
+      mountpoint=$(mount | grep "^$devpath" 2>/dev/null | awk '{print $3}')
+      echo "  $dev already mounted at $mountpoint"
+      [ -z "$FIRST_MOUNT" ] && echo "$mountpoint" > /tmp/.first_mount
+      continue
+    fi
+
+    # Mount using udisksctl (handles permissions properly)
+    echo "  Mounting $dev..."
+    if mountpoint=$(udisksctl mount -b "$devpath" 2>/dev/null | grep -oP "at \K/.*"); then
+      echo "    Mounted at $mountpoint"
+      [ ! -f /tmp/.first_mount ] && echo "$mountpoint" > /tmp/.first_mount
+    else
+      echo "    Warning: Could not mount $dev (continuing...)"
+    fi
+  done < <(lsblk -rno NAME,TYPE,RM,MOUNTPOINT 2>/dev/null | awk '$2=="part" && $3=="0" && $4=="" {print $1}')
+) || echo "Warning: Drive mounting encountered errors (continuing...)"
+
+# Read first mount from temp file (set in subshell)
+if [ -f /tmp/.first_mount ]; then
+  FIRST_MOUNT=$(cat /tmp/.first_mount 2>/dev/null)
+  rm -f /tmp/.first_mount
+fi
+
+if [ -n "$FIRST_MOUNT" ]; then
+  echo "First internal drive mounted at: $FIRST_MOUNT"
+  # Create downloads directory on internal drive
+  DOWNLOAD_DIR="$FIRST_MOUNT/Downloads"
+  if mkdir -p "$DOWNLOAD_DIR" 2>/dev/null; then
+    echo "Created $DOWNLOAD_DIR"
+  else
+    echo "Warning: Could not create $DOWNLOAD_DIR (continuing...)"
+    DOWNLOAD_DIR=""
+  fi
+else
+  echo "No internal drives found to mount (continuing...)"
+  DOWNLOAD_DIR=""
+fi
 
 echo -e "\n>>>> Activating wired ethernet"
 activate_ethernet() {
@@ -307,6 +359,50 @@ install_chrome_extension() {
 echo -e "\n>>>> Installing Chrome extensions"
 install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube™ Ads"
+
+# Set Chrome download directory to internal drive (if mounted)
+# Wrapped to ensure errors don't stop setup
+if [ -n "$DOWNLOAD_DIR" ] && [ -d "$DOWNLOAD_DIR" ]; then
+  echo -e "\n>>>> Setting Chrome download directory to $DOWNLOAD_DIR"
+  (
+    set +e  # Disable exit-on-error for this section
+    if ! mkdir -p ~/.config/google-chrome/Default 2>/dev/null; then
+      echo "Warning: Could not create Chrome config directory"
+      exit 0
+    fi
+    # Create or update Preferences file with download directory
+    PREFS_FILE="$HOME/.config/google-chrome/Default/Preferences"
+    if [ -f "$PREFS_FILE" ]; then
+      # Update existing preferences
+      if command -v python3 &>/dev/null; then
+        python3 -c "
+import json
+import sys
+try:
+    with open('$PREFS_FILE', 'r') as f:
+        prefs = json.load(f)
+except:
+    prefs = {}
+prefs.setdefault('download', {})['default_directory'] = '$DOWNLOAD_DIR'
+with open('$PREFS_FILE', 'w') as f:
+    json.dump(prefs, f)
+print('Chrome download directory set')
+" || echo "Warning: Could not update Chrome preferences"
+      else
+        echo "Warning: python3 not available for Chrome config"
+      fi
+    else
+      # Create new preferences file
+      if echo "{\"download\":{\"default_directory\":\"$DOWNLOAD_DIR\"}}" > "$PREFS_FILE" 2>/dev/null; then
+        echo "Chrome download directory configured"
+      else
+        echo "Warning: Could not create Chrome preferences file"
+      fi
+    fi
+  ) || echo "Warning: Chrome download config failed (continuing...)"
+else
+  echo "Skipping Chrome download directory (no internal drive mounted)"
+fi
 
 # Launch Chrome now so user doesn't wait for VLC install
 launch_chrome || true
