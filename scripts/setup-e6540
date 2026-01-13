@@ -42,7 +42,7 @@ activate_ethernet() {
   echo "No wired connection"
   return 1
 }
-activate_ethernet
+activate_ethernet || true  # Network already up (script was cloned), don't exit if this fails
 
 echo -e "\n>>>> Configuring displays"
 configure_displays() {
@@ -106,7 +106,7 @@ configure_displays() {
     echo "$xrandr_out" | grep " connected" || echo "  (none detected)"
   fi
 }
-configure_displays
+configure_displays || true  # Don't exit if display config fails
 
 # Screen timeout handled in security section (5 min idle lock)
 # Video players auto-inhibit screensaver during playback
@@ -159,7 +159,7 @@ configure_audio() {
     fi
   fi
 }
-configure_audio
+configure_audio || true  # Don't exit if audio config fails
 
 echo -e "\n>>>> Setting timezone to Pacific"
 sudo timedatectl set-timezone America/Los_Angeles
