@@ -217,8 +217,10 @@ echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp /tmp/cubic2/scripts/x /usr/bin/x
 sudo chmod +x /usr/bin/x
 
-# Note: Dock favorites, dark mode, screen lock, and remote desktop settings
-# are pre-configured in the ISO via dconf database (docker-build.sh)
+echo -e "\n>>>> Setting dock favorites"
+# Set favorites at runtime after Chrome/VLC are installed (not in ISO build)
+# This prevents GNOME shell freeze when apps don't exist yet
+gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']"
 
 echo -e "\n>>>> Hardening security"
 # Enable firewall - deny all incoming, allow outgoing

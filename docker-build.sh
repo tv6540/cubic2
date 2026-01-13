@@ -222,8 +222,7 @@ echo "=== Configuring GNOME settings via dconf ==="
 mkdir -p "$SQUASH_DIR/home/ubuntu/.config/dconf"
 mkdir -p /tmp/dconf-keyfiles.d
 cat > /tmp/dconf-keyfiles.d/00-settings << 'EOF'
-[org/gnome/shell]
-favorite-apps=['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']
+# Note: favorite-apps set at runtime in setup-e6540 after Chrome/VLC install
 
 [org/gnome/desktop/interface]
 color-scheme='prefer-dark'
