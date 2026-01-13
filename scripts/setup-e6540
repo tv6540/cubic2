@@ -135,8 +135,23 @@ configure_displays() {
 
     # Disable internal display only if external is working
     if [ -n "$internal" ] && xrandr --listactivemonitors 2>/dev/null | grep -q "$external"; then
-      echo "Disabling internal display ($internal)"
-      xrandr --output "$internal" --off 2>/dev/null || echo "Warning: Could not disable $internal"
+      echo "Disabling internal display ($internal) in background..."
+      # Spawn background daemon that retries until internal display is off (max 5 min)
+      (
+        attempts=0
+        max_attempts=100  # 100 * 3s = 5 minutes
+        while xrandr --listactivemonitors 2>/dev/null | grep -q "$internal"; do
+          xrandr --output "$internal" --off 2>/dev/null
+          attempts=$((attempts + 1))
+          if [ $attempts -ge $max_attempts ]; then
+            echo "Warning: Could not disable $internal after 5 minutes" >> "$LOG_FILE"
+            break
+          fi
+          sleep 3
+        done
+        [ $attempts -lt $max_attempts ] && echo "Internal display ($internal) disabled" >> "$LOG_FILE"
+      ) &
+      disown
     fi
   else
     echo "No external display detected"
@@ -183,35 +198,50 @@ else
   fi
 fi
 
-echo -e "\n>>>> Setting audio output"
-configure_audio() {
-  if ! command -v pactl &>/dev/null; then
-    echo "Warning: pactl not available"
-    return 1
-  fi
+echo -e "\n>>>> Setting audio output in background..."
+# Spawn background daemon that waits for PulseAudio and configures HDMI audio (max 5 min)
+(
+  attempts=0
+  max_attempts=150  # 150 * 2s = 5 minutes for PulseAudio wait
 
-  # Wait a moment for audio to initialize after display changes
-  sleep 1
-
-  # Try HDMI/DisplayPort audio first (covers HDMI and DP)
-  local hdmi_sink
-  hdmi_sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
-
-  if [ -n "$hdmi_sink" ]; then
-    pactl set-default-sink "$hdmi_sink" && echo "Audio: $hdmi_sink" || echo "Warning: Failed to set $hdmi_sink"
-  else
-    # No HDMI sink - use first available sink (usually built-in speakers)
-    local default_sink
-    default_sink=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
-    if [ -n "$default_sink" ]; then
-      echo "No HDMI audio, using: $default_sink"
-      pactl set-default-sink "$default_sink" 2>/dev/null || echo "Warning: Failed to set default sink"
-    else
-      echo "Warning: No audio sinks found"
+  # Wait for PulseAudio to be ready
+  while ! pactl info &>/dev/null; do
+    attempts=$((attempts + 1))
+    if [ $attempts -ge $max_attempts ]; then
+      echo "Warning: PulseAudio not available after 5 minutes" >> "$LOG_FILE"
+      exit 1
     fi
-  fi
-}
-configure_audio || true  # Don't exit if audio config fails
+    sleep 2
+  done
+
+  # Try to set HDMI audio, with fallback to default sink
+  attempts=0
+  max_attempts=100  # 100 * 3s = 5 minutes
+  while true; do
+    hdmi_sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|displayport" | head -1 | awk '{print $2}')
+    default_sink=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
+
+    # Try HDMI first
+    if [ -n "$hdmi_sink" ] && pactl set-default-sink "$hdmi_sink" 2>/dev/null; then
+      echo "Audio configured: $hdmi_sink" >> "$LOG_FILE"
+      break
+    fi
+
+    # Fall back to default sink
+    if [ -n "$default_sink" ] && pactl set-default-sink "$default_sink" 2>/dev/null; then
+      echo "Audio configured: $default_sink (no HDMI)" >> "$LOG_FILE"
+      break
+    fi
+
+    attempts=$((attempts + 1))
+    if [ $attempts -ge $max_attempts ]; then
+      echo "Warning: Could not configure audio after 5 minutes" >> "$LOG_FILE"
+      break
+    fi
+    sleep 3
+  done
+) &
+disown
 
 echo -e "\n>>>> Setting timezone to Pacific"
 if sudo timedatectl set-timezone America/Los_Angeles; then
