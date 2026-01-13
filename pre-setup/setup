@@ -85,6 +85,13 @@ main() {
     sudo apt-get install -y -qq git
   fi
 
+  # Ensure git is installed
+  if ! command -v git &> /dev/null; then
+    echo "Installing git..."
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq git
+  fi
+
   echo "Cloning setup repository..."
   rm -rf "$SETUP_DIR"
   git clone -q "$REPO_URL" "$SETUP_DIR"
