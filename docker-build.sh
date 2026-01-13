@@ -144,32 +144,63 @@ echo "=== Pre-installing packages (git, curl, vlc, pulseaudio-utils) ==="
 # Use chroot to install packages into the squashfs filesystem
 # This significantly reduces first-boot setup time
 
+# For layered squashfs, we need to mount all layers with overlayfs to get complete filesystem
+CHROOT_DIR="/tmp/chroot_merged"
+OVERLAY_WORK="/tmp/overlay_work"
+LOWER_DIR1="/tmp/lower_minimal"
+LOWER_DIR2="/tmp/lower_standard"
+
 # Cleanup function for chroot mounts (called on exit or error)
 cleanup_chroot() {
   echo "Cleaning up chroot mounts..."
-  umount "$SQUASH_DIR/sys" 2>/dev/null || true
-  umount "$SQUASH_DIR/proc" 2>/dev/null || true
-  umount "$SQUASH_DIR/dev/pts" 2>/dev/null || true
-  umount "$SQUASH_DIR/dev" 2>/dev/null || true
-  rm -f "$SQUASH_DIR/etc/resolv.conf" 2>/dev/null || true
+  umount "$CHROOT_DIR/sys" 2>/dev/null || true
+  umount "$CHROOT_DIR/proc" 2>/dev/null || true
+  umount "$CHROOT_DIR/dev/pts" 2>/dev/null || true
+  umount "$CHROOT_DIR/dev" 2>/dev/null || true
+  umount "$CHROOT_DIR" 2>/dev/null || true
+  umount "$LOWER_DIR2" 2>/dev/null || true
+  umount "$LOWER_DIR1" 2>/dev/null || true
+  rm -rf "$OVERLAY_WORK" "$LOWER_DIR1" "$LOWER_DIR2" "$CHROOT_DIR" 2>/dev/null || true
 }
 trap cleanup_chroot EXIT
 
+if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
+  # Layered squashfs - need to mount all layers with overlayfs
+  echo "Setting up overlayfs for layered squashfs..."
+
+  mkdir -p "$LOWER_DIR1" "$LOWER_DIR2" "$OVERLAY_WORK" "$CHROOT_DIR"
+
+  # Mount base layers read-only
+  mount -t squashfs -o ro "$CASPER_DIR/minimal.squashfs" "$LOWER_DIR1"
+  mount -t squashfs -o ro "$CASPER_DIR/minimal.standard.squashfs" "$LOWER_DIR2"
+
+  # Create overlay: lower=standard:minimal, upper=live (extracted), work=temp
+  # Changes will be written to SQUASH_DIR (our extracted top layer)
+  mount -t overlay overlay \
+    -o "lowerdir=$LOWER_DIR2:$LOWER_DIR1,upperdir=$SQUASH_DIR,workdir=$OVERLAY_WORK" \
+    "$CHROOT_DIR"
+
+  echo "Overlayfs mounted at $CHROOT_DIR"
+else
+  # Single squashfs - use directly
+  CHROOT_DIR="$SQUASH_DIR"
+fi
+
 # Create mount points if they don't exist
-mkdir -p "$SQUASH_DIR/dev/pts" "$SQUASH_DIR/proc" "$SQUASH_DIR/sys"
+mkdir -p "$CHROOT_DIR/dev/pts" "$CHROOT_DIR/proc" "$CHROOT_DIR/sys"
 
 # Mount required filesystems for chroot
-mount --bind /dev "$SQUASH_DIR/dev"
-mkdir -p "$SQUASH_DIR/dev/pts"  # Recreate after bind mount
-mount --bind /dev/pts "$SQUASH_DIR/dev/pts"
-mount -t proc proc "$SQUASH_DIR/proc"
-mount -t sysfs sysfs "$SQUASH_DIR/sys"
+mount --bind /dev "$CHROOT_DIR/dev"
+mkdir -p "$CHROOT_DIR/dev/pts"  # Recreate after bind mount
+mount --bind /dev/pts "$CHROOT_DIR/dev/pts"
+mount -t proc proc "$CHROOT_DIR/proc"
+mount -t sysfs sysfs "$CHROOT_DIR/sys"
 
 # Copy DNS resolution for network access
-cp /etc/resolv.conf "$SQUASH_DIR/etc/resolv.conf"
+cp /etc/resolv.conf "$CHROOT_DIR/etc/resolv.conf"
 
 # Install packages inside chroot
-chroot "$SQUASH_DIR" /bin/bash << 'CHROOT_EOF'
+chroot "$CHROOT_DIR" /bin/bash << 'CHROOT_EOF'
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 
@@ -187,14 +218,24 @@ rm -rf /var/cache/apt/archives/*
 echo "Package installation complete"
 CHROOT_EOF
 
-# Unmount chroot filesystems (also handled by trap, but do explicitly for clarity)
-umount "$SQUASH_DIR/sys" 2>/dev/null || true
-umount "$SQUASH_DIR/proc" 2>/dev/null || true
-umount "$SQUASH_DIR/dev/pts" 2>/dev/null || true
-umount "$SQUASH_DIR/dev" 2>/dev/null || true
+# Unmount chroot filesystems
+umount "$CHROOT_DIR/sys" 2>/dev/null || true
+umount "$CHROOT_DIR/proc" 2>/dev/null || true
+umount "$CHROOT_DIR/dev/pts" 2>/dev/null || true
+umount "$CHROOT_DIR/dev" 2>/dev/null || true
 
 # Remove resolv.conf (will be regenerated at boot)
-rm -f "$SQUASH_DIR/etc/resolv.conf"
+rm -f "$CHROOT_DIR/etc/resolv.conf" 2>/dev/null || true
+
+# For layered mode, unmount overlay and base layers
+# Changes are already in $SQUASH_DIR (the upperdir)
+if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
+  echo "Unmounting overlayfs..."
+  umount "$CHROOT_DIR" 2>/dev/null || true
+  umount "$LOWER_DIR2" 2>/dev/null || true
+  umount "$LOWER_DIR1" 2>/dev/null || true
+  rm -rf "$OVERLAY_WORK" "$LOWER_DIR1" "$LOWER_DIR2" "$CHROOT_DIR" 2>/dev/null || true
+fi
 
 # Clear the chroot cleanup trap now that we're done
 trap - EXIT
