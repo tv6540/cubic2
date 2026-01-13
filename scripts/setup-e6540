@@ -17,13 +17,43 @@ upload_logs() {
   fi
   LOG_URL=$(curl -s --max-time 15 -F "content=<$LOG_FILE" -F "expiry_days=1" https://dpaste.com/api/v2/ 2>/dev/null)
   if [ -n "$LOG_URL" ]; then
-    echo "Log uploaded: $LOG_URL"
     echo "Log URL: $LOG_URL" >> "$LOG_FILE"
+    echo ""
+    echo "============================================"
+    echo "  SETUP LOG UPLOADED"
+    echo "  $LOG_URL"
+    echo "============================================"
+    echo ""
+    echo "Terminal will close in 10 minutes..."
+    echo "(Press Ctrl+C to close now)"
+    sleep 600
   else
     echo "Log upload failed (dpaste unreachable or timeout)"
+    echo "Local log available at: $LOG_FILE"
+    sleep 60
   fi
 }
 trap upload_logs EXIT
+
+# Launch Chrome in background (called after install, before VLC)
+launch_chrome() {
+  if command -v google-chrome-stable &>/dev/null; then
+    echo -e "\n>>>> Launching Chrome..."
+    systemd-run --user --no-block \
+      --setenv=DISPLAY="$DISPLAY" \
+      --setenv=DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+      google-chrome-stable \
+      --no-first-run \
+      --no-default-browser-check \
+      --disable-session-crashed-bubble \
+      --no-sandbox \
+      --start-fullscreen \
+      "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/"
+    echo "Chrome launched via systemd"
+  else
+    echo "ERROR: Chrome not found after installation!"
+  fi
+}
 
 # Kill gnome-initial-setup if somehow still running (should be disabled at build time)
 echo -e "\n>>>> Ensuring gnome-initial-setup is stopped"
@@ -244,6 +274,9 @@ echo -e "\n>>>> Installing Chrome extensions"
 install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube™ Ads"
 
+# Launch Chrome now so user doesn't wait for VLC install
+launch_chrome || true
+
 echo -e "\n>>>> Installing VLC"
 if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vlc; then
   echo "VLC installed"
@@ -323,24 +356,5 @@ echo -e "    Tip: Run 'x' anytime to reset display/audio settings."
 echo -e "    Log: ~/setup.log"
 echo "=== Setup finished at $(date) ==="
 
-echo -e "\n>>>> Launching Chrome..."
-sleep 3
-if command -v google-chrome-stable &> /dev/null; then
-  # Launch Chrome fully detached using systemd-run (survives terminal close)
-  # Ref: https://man7.org/linux/man-pages/man1/systemd-run.1.html
-  # Ref: https://words.yuvi.in/post/systemd-gui-applications/
-  # GUI apps need DISPLAY and DBUS_SESSION_BUS_ADDRESS env vars
-  systemd-run --user --no-block \
-    --setenv=DISPLAY="$DISPLAY" \
-    --setenv=DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
-    google-chrome-stable \
-    --no-first-run \
-    --no-default-browser-check \
-    --disable-session-crashed-bubble \
-    --no-sandbox \
-    --start-fullscreen \
-    "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/"
-  echo "Chrome launched via systemd"
-else
-  echo "ERROR: Chrome not found!"
-fi
+# Chrome already launched earlier (after install, before VLC)
+# Script will now exit and trigger upload_logs via EXIT trap

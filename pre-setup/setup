@@ -78,19 +78,10 @@ main() {
   # Combined ethernet activation + network wait
   activate_and_wait_for_network
 
-  # Ensure git is installed
-  if ! command -v git &> /dev/null; then
-    echo "Installing git..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq git
-  fi
-
-  # Ensure git is installed
-  if ! command -v git &> /dev/null; then
-    echo "Installing git..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq git
-  fi
+  # Install git and curl (curl needed for log upload at end)
+  echo "Installing dependencies (git, curl)..."
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq git curl
 
   echo "Cloning setup repository..."
   rm -rf "$SETUP_DIR"
