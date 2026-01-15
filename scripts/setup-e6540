@@ -106,17 +106,53 @@ install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube Ads"
 
 # Set Chrome download directory via policy (Preferences gets overwritten on first run)
-if [ -n "$FIRST_MOUNT" ]; then
-  DOWNLOAD_DIR="$FIRST_MOUNT/Downloads"
-  mkdir -p "$DOWNLOAD_DIR" 2>/dev/null || true
-  sudo mkdir -p /etc/opt/chrome/policies/managed
-  sudo tee /etc/opt/chrome/policies/managed/download_policy.json > /dev/null << EOF
+# Priority: 1) First mounted internal drive 2) Any drive with >100GB free 3) Skip policy (use Chrome default)
+set_chrome_download_dir() {
+  local DOWNLOAD_DIR=""
+
+  # Try first mounted internal drive from earlier
+  if [ -n "$FIRST_MOUNT" ] && mountpoint -q "$FIRST_MOUNT" 2>/dev/null; then
+    local free_kb=$(df -k "$FIRST_MOUNT" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_kb" ] && [ "$free_kb" -gt 104857600 ] 2>/dev/null; then
+      DOWNLOAD_DIR="$FIRST_MOUNT/chrome-dl"
+      echo "Using first mount with $(( free_kb / 1024 / 1024 ))GB free: $FIRST_MOUNT"
+    fi
+  fi
+
+  # Fallback: scan for mounted partition with >100GB free
+  if [ -z "$DOWNLOAD_DIR" ]; then
+    echo "Scanning for large drives..."
+    while IFS= read -r mount_point; do
+      case "$mount_point" in
+        /|/boot*|/snap*|/sys*|/proc*|/dev*|/run*|/cdrom*) continue ;;
+      esac
+      local free_kb=$(df -k "$mount_point" 2>/dev/null | awk 'NR==2 {print $4}')
+      if [ -n "$free_kb" ] && [ "$free_kb" -gt 104857600 ] 2>/dev/null; then
+        DOWNLOAD_DIR="$mount_point/chrome-dl"
+        echo "Found drive with $(( free_kb / 1024 / 1024 ))GB free: $mount_point"
+        break
+      fi
+    done < <(df --output=target 2>/dev/null | tail -n +2)
+  fi
+
+  # Set policy only if we found a suitable location
+  if [ -n "$DOWNLOAD_DIR" ]; then
+    if mkdir -p "$DOWNLOAD_DIR" 2>/dev/null && [ -w "$DOWNLOAD_DIR" ]; then
+      sudo mkdir -p /etc/opt/chrome/policies/managed
+      sudo tee /etc/opt/chrome/policies/managed/download_policy.json > /dev/null << EOF
 {
   "DownloadDirectory": "$DOWNLOAD_DIR"
 }
 EOF
-  echo "Chrome download dir (policy): $DOWNLOAD_DIR"
-fi
+      echo "Chrome download dir (policy): $DOWNLOAD_DIR"
+    else
+      echo "Warning: Could not create $DOWNLOAD_DIR, using Chrome default"
+    fi
+  else
+    echo "No suitable drive found (>100GB free), using Chrome default download location"
+  fi
+}
+set_chrome_download_dir
 
 echo -e "\n>>>> Launching Chrome"
 nohup google-chrome-stable \
