@@ -140,107 +140,8 @@ EOF
 
 echo "welcome/setup removal from top layer complete"
 
-echo "=== Pre-installing packages (git, curl, vlc, pulseaudio-utils) ==="
-# Use chroot to install packages into the squashfs filesystem
-# This significantly reduces first-boot setup time
-
-# For layered squashfs, we need to mount all layers with overlayfs to get complete filesystem
-CHROOT_DIR="/tmp/chroot_merged"
-OVERLAY_WORK="/tmp/overlay_work"
-LOWER_DIR1="/tmp/lower_minimal"
-LOWER_DIR2="/tmp/lower_standard"
-
-# Cleanup function for chroot mounts (called on exit or error)
-cleanup_chroot() {
-  echo "Cleaning up chroot mounts..."
-  umount "$CHROOT_DIR/sys" 2>/dev/null || true
-  umount "$CHROOT_DIR/proc" 2>/dev/null || true
-  umount "$CHROOT_DIR/dev/pts" 2>/dev/null || true
-  umount "$CHROOT_DIR/dev" 2>/dev/null || true
-  umount "$CHROOT_DIR" 2>/dev/null || true
-  umount "$LOWER_DIR2" 2>/dev/null || true
-  umount "$LOWER_DIR1" 2>/dev/null || true
-  rm -rf "$OVERLAY_WORK" "$LOWER_DIR1" "$LOWER_DIR2" "$CHROOT_DIR" 2>/dev/null || true
-}
-trap cleanup_chroot EXIT
-
-if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
-  # Layered squashfs - need to mount all layers with overlayfs
-  echo "Setting up overlayfs for layered squashfs..."
-
-  mkdir -p "$LOWER_DIR1" "$LOWER_DIR2" "$OVERLAY_WORK" "$CHROOT_DIR"
-
-  # Mount base layers read-only
-  mount -t squashfs -o ro "$CASPER_DIR/minimal.squashfs" "$LOWER_DIR1"
-  mount -t squashfs -o ro "$CASPER_DIR/minimal.standard.squashfs" "$LOWER_DIR2"
-
-  # Create overlay: lower=standard:minimal, upper=live (extracted), work=temp
-  # Changes will be written to SQUASH_DIR (our extracted top layer)
-  mount -t overlay overlay \
-    -o "lowerdir=$LOWER_DIR2:$LOWER_DIR1,upperdir=$SQUASH_DIR,workdir=$OVERLAY_WORK" \
-    "$CHROOT_DIR"
-
-  echo "Overlayfs mounted at $CHROOT_DIR"
-else
-  # Single squashfs - use directly
-  CHROOT_DIR="$SQUASH_DIR"
-fi
-
-# Create mount points if they don't exist
-mkdir -p "$CHROOT_DIR/dev/pts" "$CHROOT_DIR/proc" "$CHROOT_DIR/sys"
-
-# Mount required filesystems for chroot
-mount --bind /dev "$CHROOT_DIR/dev"
-mkdir -p "$CHROOT_DIR/dev/pts"  # Recreate after bind mount
-mount --bind /dev/pts "$CHROOT_DIR/dev/pts"
-mount -t proc proc "$CHROOT_DIR/proc"
-mount -t sysfs sysfs "$CHROOT_DIR/sys"
-
-# Copy DNS resolution for network access
-cp /etc/resolv.conf "$CHROOT_DIR/etc/resolv.conf"
-
-# Install packages inside chroot
-chroot "$CHROOT_DIR" /bin/bash << 'CHROOT_EOF'
-export DEBIAN_FRONTEND=noninteractive
-export LC_ALL=C
-
-echo "Updating package lists..."
-apt-get update -qq
-
-echo "Installing git, curl, vlc, pulseaudio-utils..."
-apt-get install -y -qq --no-install-recommends git curl vlc pulseaudio-utils
-
-echo "Cleaning up apt cache..."
-apt-get clean
-rm -rf /var/lib/apt/lists/*
-rm -rf /var/cache/apt/archives/*
-
-echo "Package installation complete"
-CHROOT_EOF
-
-# Unmount chroot filesystems
-umount "$CHROOT_DIR/sys" 2>/dev/null || true
-umount "$CHROOT_DIR/proc" 2>/dev/null || true
-umount "$CHROOT_DIR/dev/pts" 2>/dev/null || true
-umount "$CHROOT_DIR/dev" 2>/dev/null || true
-
-# Remove resolv.conf (will be regenerated at boot)
-rm -f "$CHROOT_DIR/etc/resolv.conf" 2>/dev/null || true
-
-# For layered mode, unmount overlay and base layers
-# Changes are already in $SQUASH_DIR (the upperdir)
-if [ -f "$CASPER_DIR/minimal.squashfs" ]; then
-  echo "Unmounting overlayfs..."
-  umount "$CHROOT_DIR" 2>/dev/null || true
-  umount "$LOWER_DIR2" 2>/dev/null || true
-  umount "$LOWER_DIR1" 2>/dev/null || true
-  rm -rf "$OVERLAY_WORK" "$LOWER_DIR1" "$LOWER_DIR2" "$CHROOT_DIR" 2>/dev/null || true
-fi
-
-# Clear the chroot cleanup trap now that we're done
-trap - EXIT
-
-echo "Pre-installed packages complete"
+# Note: Package pre-installation skipped - layered squashfs doesn't support chroot in Docker
+# Packages (git, curl, vlc, pulseaudio-utils) will be installed at runtime by setup-e6540
 
 echo "=== Injecting setup files ==="
 cp /work/pre-setup/setup "$SQUASH_DIR/usr/bin/setup"
@@ -266,13 +167,16 @@ EOF
 echo "=== Disabling gnome-initial-setup (belt and suspenders) ==="
 # Even though we removed the binary, add config overrides in case package gets reinstalled
 
-# 1. GDM config - disable initial setup AND enable auto-login
+# 1. GDM config - disable initial setup, enable auto-login, DISABLE WAYLAND (force X11)
+# Ubuntu 24.04 uses Wayland by default, but xrandr only works on X11
+# Ref: https://lindevs.com/disable-wayland-on-ubuntu
 mkdir -p "$SQUASH_DIR/etc/gdm3"
 cat > "$SQUASH_DIR/etc/gdm3/custom.conf" << 'EOF'
 [daemon]
 InitialSetupEnable=false
 AutomaticLoginEnable=true
 AutomaticLogin=ubuntu
+WaylandEnable=false
 EOF
 
 # 2. Mask systemd user service
@@ -335,7 +239,7 @@ lock-enabled=true
 lock-delay=uint32 0
 
 [org/gnome/desktop/session]
-idle-delay=uint32 300
+idle-delay=uint32 0
 
 [org/gnome/desktop/remote-desktop/rdp]
 enable=false

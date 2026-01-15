@@ -5,28 +5,36 @@ LOG_FILE="$HOME/setup.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== Setup started at $(date) ==="
 
-# Display and audio FIRST (same as v1 - hardcoded, no detection)
-echo -e ">>>> TV resolution to 1600x900"
-xrandr --output HDMI-1 --primary --mode 1600x900
+# Display setup - OptiPlex 7050 has: 2x DP 1.2, 1x HDMI 1.4, 1x VGA
+echo -e ">>>> Detecting connected display"
+CONNECTED_OUTPUT=$(xrandr | grep -E "^(HDMI|DP|VGA|DisplayPort)" | grep " connected" | head -1 | awk '{print $1}')
+if [ -z "$CONNECTED_OUTPUT" ]; then
+  echo "Warning: No external display detected, skipping display config"
+else
+  echo "Found display on: $CONNECTED_OUTPUT"
 
-echo -e "\n>>>> Disable internal monitor"
-xrandr --output eDP-1 --off
+  # Try 1920x1080 first, fallback to 1600x900 if it fails (for older TVs)
+  if xrandr | grep -q "1920x1080"; then
+    echo "Setting resolution to 1920x1080"
+    xrandr --output "$CONNECTED_OUTPUT" --primary --mode 1920x1080 || \
+      xrandr --output "$CONNECTED_OUTPUT" --primary --mode 1600x900
+  else
+    echo "Setting resolution to 1600x900"
+    xrandr --output "$CONNECTED_OUTPUT" --primary --mode 1600x900
+  fi
+fi
 
 echo -e "\n>>>> Set screen timeout to never"
 gsettings set org.gnome.desktop.session idle-delay 0
 
-echo -e "\n>>>> Ignore Lid Switch"
-grep -q "HandleLidSwitch=ignore" /etc/systemd/logind.conf 2>/dev/null || \
-  echo "HandleLidSwitch=ignore" | sudo tee -a /etc/systemd/logind.conf
-
-echo -e "\n>>>> Set HDMI audio"
-# Ubuntu 24.04 uses PipeWire - use pactl (pacmd is deprecated)
-HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
+echo -e "\n>>>> Set audio output"
+# Ubuntu 24.04 uses PipeWire - prefer HDMI/DP audio if available
+HDMI_SINK=$(pactl list short sinks | grep -iE "hdmi|dp" | head -1 | awk '{print $2}')
 if [ -n "$HDMI_SINK" ]; then
   pactl set-default-sink "$HDMI_SINK"
-  echo "HDMI audio set: $HDMI_SINK"
+  echo "Audio set to: $HDMI_SINK"
 else
-  echo "Warning: No HDMI sink found"
+  echo "No HDMI/DP audio sink found, using default"
 fi
 
 echo -e "\n>>>> Set timezone to PT"

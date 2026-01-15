@@ -1,135 +1,23 @@
 #!/bin/bash
-# Quick display/audio/network reset - run with: x
+# Quick display/audio reset - same as v1
 
-echo -e ">>>> Activating wired ethernet"
-dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
-if [ -n "$dev" ]; then
-  connected=false
-  for attempt in 1 2 3; do
-    if nmcli device connect "$dev" 2>/dev/null; then
-      echo "Connected: $dev"
-      connected=true
-      break
-    fi
-    [ $attempt -lt 3 ] && { echo "Retry $attempt - restarting NM..."; sudo systemctl restart NetworkManager; sleep 2; }
-  done
-  [ "$connected" = false ] && echo "Ethernet failed: Could not connect $dev after 3 attempts"
+echo -e ">>>> TV resolution to 1600x900"
+xrandr --output HDMI-1 --primary --mode 1600x900
+
+echo -e "\n>>>> Disable internal monitor"
+xrandr --output eDP-1 --off
+
+echo -e "\n>>>> Set screen timeout to never"
+gsettings set org.gnome.desktop.session idle-delay 0
+
+echo -e "\n>>>> Set HDMI audio"
+# Ubuntu 24.04 uses PipeWire - use pactl (pacmd is deprecated)
+HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
+if [ -n "$HDMI_SINK" ]; then
+  pactl set-default-sink "$HDMI_SINK"
+  echo "HDMI audio set: $HDMI_SINK"
 else
-  echo "No ethernet device found"
-fi
-
-echo -e "\n>>>> Configuring displays"
-XRANDR_OUT=$(xrandr --current 2>/dev/null) || { echo "xrandr failed"; exit 1; }
-
-# Log initial state
-echo "Current display state:"
-echo "$XRANDR_OUT" | grep -E "^[A-Za-z].*connected" || echo "  (none detected)"
-
-# Find external display (HDMI, DP, DisplayPort, VGA, DVI)
-EXTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|DisplayPort|VGA|DVI)" | grep " connected" | head -1 | awk '{print $1}')
-
-# Find internal display (eDP, LVDS, DSI)
-INTERNAL=$(echo "$XRANDR_OUT" | grep -E "^(eDP|LVDS|DSI)" | grep " connected" | head -1 | awk '{print $1}')
-
-echo "Detected: external=$EXTERNAL internal=$INTERNAL"
-
-if [ -n "$EXTERNAL" ]; then
-  # Use 1600x900 for Intel Haswell HDMI - higher resolutions cause audio issues
-  echo "Setting $EXTERNAL as primary at 1600x900 (Haswell HDMI audio fix)"
-  if xrandr --output "$EXTERNAL" --primary --mode 1600x900 2>&1; then
-    echo "  xrandr command succeeded"
-  else
-    echo "  Warning: 1600x900 failed, trying auto..."
-    xrandr --output "$EXTERNAL" --primary --auto 2>&1 || echo "  auto also failed"
-  fi
-
-  # Verify external is active
-  if ! xrandr --listactivemonitors 2>/dev/null | grep -q "$EXTERNAL"; then
-    echo "ERROR: $EXTERNAL not active after configuration!"
-  fi
-
-  # Disable internal display with retries
-  if [ -n "$INTERNAL" ]; then
-    echo "Disabling internal display ($INTERNAL)..."
-    disabled=false
-    for attempt in 1 2 3 4 5; do
-      if ! xrandr --listactivemonitors 2>/dev/null | grep -q "$INTERNAL"; then
-        echo "  Internal display disabled (attempt $attempt)"
-        disabled=true
-        break
-      fi
-      echo "  Attempt $attempt: disabling $INTERNAL..."
-      xrandr --output "$INTERNAL" --off 2>&1 || true
-      sleep 1
-    done
-    if [ "$disabled" = false ]; then
-      # Disable failed - try mirroring as fallback (ensures Activities shows on TV)
-      echo "  Disable failed, trying mirror mode as fallback..."
-      if xrandr --output "$INTERNAL" --same-as "$EXTERNAL" --auto 2>&1; then
-        echo "  Mirror mode enabled ($INTERNAL mirrors $EXTERNAL)"
-        echo "  Note: Both screens show same content now"
-      else
-        echo "  WARNING: Could not disable or mirror $INTERNAL"
-        echo "  Windows key may show blank (Activities on wrong display)"
-      fi
-    fi
-  fi
-
-  # Final state
-  echo "Final display state:"
-  xrandr --listactivemonitors 2>/dev/null || echo "  (could not list monitors)"
-else
-  echo "No external display found"
-  if [ -n "$INTERNAL" ]; then
-    xrandr --output "$INTERNAL" --auto 2>/dev/null || echo "Warning: Failed to configure $INTERNAL"
-  fi
-  echo "Connected displays:"
-  echo "$XRANDR_OUT" | grep " connected" || echo "  (none)"
-fi
-
-echo -e "\n>>>> Setting screen timeout to never"
-if gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null; then
-  echo "Screen timeout disabled"
-else
-  echo "Warning: Failed to set screen timeout (gsettings error)"
-fi
-
-echo -e "\n>>>> Setting HDMI audio output"
-if ! command -v pactl &>/dev/null; then
-  echo "Warning: pactl not available, skipping audio config"
-  echo "Try: sudo apt install pulseaudio-utils"
-else
-  sleep 1  # Wait for audio to init after display change
-  echo "Available sinks:"
-  pactl list short sinks 2>/dev/null || echo "  (none)"
-
-  # Use same approach as cubic v1 - grep for hdmi, use pacmd
-  HDMI_SINK=$(pactl list short sinks 2>/dev/null | grep -i hdmi | head -1 | awk '{print $2}')
-  if [ -n "$HDMI_SINK" ]; then
-    echo "Found HDMI sink: $HDMI_SINK"
-
-    # Log audio card info for diagnostics
-    echo "Audio cards:"
-    pactl list short cards 2>/dev/null || echo "  (none)"
-
-    # Set default sink (same as cubic v1)
-    if pacmd set-default-sink "$HDMI_SINK" 2>/dev/null; then
-      echo "HDMI audio set successfully (pacmd)"
-    elif pactl set-default-sink "$HDMI_SINK" 2>/dev/null; then
-      echo "HDMI audio set successfully (pactl)"
-    else
-      echo "Warning: Failed to set HDMI audio sink"
-    fi
-  else
-    DEFAULT_SINK=$(pactl list short sinks 2>/dev/null | head -1 | awk '{print $2}')
-    if [ -n "$DEFAULT_SINK" ]; then
-      echo "No HDMI sink found, using: $DEFAULT_SINK"
-      pacmd set-default-sink "$DEFAULT_SINK" 2>/dev/null || \
-        pactl set-default-sink "$DEFAULT_SINK" 2>/dev/null || true
-    else
-      echo "Warning: No audio sinks available"
-    fi
-  fi
+  echo "Warning: No HDMI sink found"
 fi
 
 echo -e "\n>>>> Done"
