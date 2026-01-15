@@ -2,6 +2,38 @@
 set -e
 
 LOG_FILE="$HOME/setup.log"
+
+# Upload logs to dpaste on exit (success or failure) for remote diagnostics
+upload_logs() {
+  echo -e "\n>>>> Uploading logs for diagnostics..."
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "Log upload skipped: $LOG_FILE not found"
+    return
+  fi
+  if ! command -v curl &>/dev/null; then
+    echo "Log upload skipped: curl not available"
+    return
+  fi
+  LOG_URL=$(curl -s --max-time 15 -F "content=<$LOG_FILE" -F "expiry_days=1" https://dpaste.com/api/v2/ 2>/dev/null)
+  if [ -n "$LOG_URL" ]; then
+    echo "Log URL: $LOG_URL" >> "$LOG_FILE"
+    echo ""
+    echo "============================================"
+    echo "  SETUP LOG UPLOADED"
+    echo "  $LOG_URL"
+    echo "============================================"
+    echo ""
+    echo "Terminal will close in 10 minutes..."
+    echo "(Press Ctrl+C to close now)"
+    sleep 600
+  else
+    echo "Log upload failed (dpaste unreachable or timeout)"
+    echo "Local log available at: $LOG_FILE"
+    sleep 60
+  fi
+}
+trap upload_logs EXIT
+
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== Setup started at $(date) ==="
 
@@ -51,6 +83,10 @@ for dev in $(lsblk -rno NAME,TYPE,RM,MOUNTPOINT 2>/dev/null | awk '$2=="part" &&
 done
 [ -n "$FIRST_MOUNT" ] && echo "First mount: $FIRST_MOUNT"
 
+echo -e "\n>>>> Upgrading system packages (required for Chrome)"
+sudo apt-get update -qq
+sudo apt-get upgrade -y -qq
+
 echo -e "\n>>>> Installing Chrome"
 cd /tmp
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
@@ -89,7 +125,6 @@ nohup google-chrome-stable \
 disown
 
 echo -e "\n>>>> Installing VLC"
-sudo apt-get update -qq
 sudo apt-get install -y -qq vlc 2>/dev/null || true
 
 echo -e "\n>>>> Installing quick reset command (x)"
