@@ -105,13 +105,17 @@ echo -e "\n>>>> Installing Chrome extensions"
 install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
 install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube Ads"
 
-# Set Chrome download directory if internal drive mounted
+# Set Chrome download directory via policy (Preferences gets overwritten on first run)
 if [ -n "$FIRST_MOUNT" ]; then
   DOWNLOAD_DIR="$FIRST_MOUNT/Downloads"
   mkdir -p "$DOWNLOAD_DIR" 2>/dev/null || true
-  mkdir -p ~/.config/google-chrome/Default 2>/dev/null || true
-  echo "{\"download\":{\"default_directory\":\"$DOWNLOAD_DIR\"}}" > ~/.config/google-chrome/Default/Preferences 2>/dev/null || true
-  echo "Chrome download dir: $DOWNLOAD_DIR"
+  sudo mkdir -p /etc/opt/chrome/policies/managed
+  sudo tee /etc/opt/chrome/policies/managed/download_policy.json > /dev/null << EOF
+{
+  "DownloadDirectory": "$DOWNLOAD_DIR"
+}
+EOF
+  echo "Chrome download dir (policy): $DOWNLOAD_DIR"
 fi
 
 echo -e "\n>>>> Launching Chrome"
