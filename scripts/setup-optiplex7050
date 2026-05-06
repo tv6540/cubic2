@@ -188,6 +188,12 @@ sudo systemctl disable --now ssh 2>/dev/null || true
 sudo systemctl disable --now bluetooth 2>/dev/null || true
 sudo mount -o remount,ro /cdrom 2>/dev/null || true
 
+echo -e "\n>>>> Proton"
+wget https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
+sudo dpkg -i ./protonvpn-stable-release_1.0.8_all.deb && sudo apt update
+sudo apt install proton-vpn-gnome-desktop gnome-shell-extension-appindicator
+rm -rf protonvpn-stable-release_1.0.8_all.deb
+
 echo -e "\n>>>> Cleanup"
 rm -rf /tmp/cubic2
 
