@@ -159,7 +159,11 @@ set_hdmi_audio() {
     echo "Warning: no HDMI/DP audio sink found, using default"
   fi
 }
-set_hdmi_audio || echo "Warning: audio setup failed, continuing"
+if command -v pactl >/dev/null 2>&1; then
+  set_hdmi_audio || echo "Warning: audio setup failed, continuing"
+else
+  echo "pactl not installed yet (pulseaudio-utils); audio will be set after package lists refresh"
+fi
 
 echo -e "\n>>>> Set timezone to PT"
 sudo timedatectl set-timezone America/Los_Angeles
@@ -169,6 +173,7 @@ dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f
 [ -n "$dev" ] && nmcli device connect "$dev" 2>/dev/null || true
 
 echo -e "\n>>>> Mounting internal drives"
+lsblk -o NAME,TYPE,RM,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' || true
 FIRST_MOUNT=""
 for dev in $(lsblk -rno NAME,TYPE,RM,MOUNTPOINT 2>/dev/null | awk '$2=="part" && $3=="0" && $4=="" {print $1}'); do
   devpath="/dev/$dev"
@@ -183,15 +188,47 @@ for dev in $(lsblk -rno NAME,TYPE,RM,MOUNTPOINT 2>/dev/null | awk '$2=="part" &&
 done
 [ -n "$FIRST_MOUNT" ] && echo "First mount: $FIRST_MOUNT"
 
-echo -e "\n>>>> Upgrading system packages (required for Chrome)"
+# ---------------------------------------------------------------------------
+# Disk space: on a live USB every write goes to a RAM-backed overlay (a few GB
+# at most). A full "apt-get upgrade" filled it on the T450 and everything after
+# it failed with "No space left on device". So: refresh package lists only, no
+# upgrade (Chrome installed fine without one before it was added), and clean
+# apt's download cache and any core dumps after each install.
+# ---------------------------------------------------------------------------
+free_space() {
+  sudo apt-get clean 2>/dev/null || true
+  sudo rm -rf /var/crash/* 2>/dev/null || true
+  echo "  free on /: $(df -h / 2>/dev/null | awk 'NR==2 {print $4}')"
+}
+
+echo -e "\n>>>> Disk space before installs"
+# apport writes core dumps into the RAM overlay; stop it for this session
+sudo systemctl stop apport 2>/dev/null || true
+free_space
+free -m 2>/dev/null | sed 's/^/  /' || true
+
+echo -e "\n>>>> Refreshing package lists (no full upgrade, see note above)"
 sudo apt-get update -qq
-sudo apt-get upgrade -y -qq
+
+echo -e "\n>>>> Audio, second pass"
+# pactl (pulseaudio-utils, tiny) may be missing from the live image; without it
+# the first audio pass above sees no cards and no sinks at all.
+if ! command -v pactl >/dev/null 2>&1; then
+  sudo apt-get install -y -qq pulseaudio-utils 2>/dev/null || true
+fi
+if command -v pactl >/dev/null 2>&1; then
+  set_hdmi_audio || echo "Warning: audio setup failed, continuing"
+else
+  echo "Warning: pactl still unavailable, leaving audio at default"
+fi
+free_space
 
 echo -e "\n>>>> Installing Chrome"
 cd /tmp
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 sudo dpkg -i google-chrome-stable_current_amd64.deb 2>/dev/null || sudo apt-get install -f -y
 rm -f google-chrome-stable_current_amd64.deb
+free_space
 
 install_chrome_extension() {
   local ext_id="$1" ext_name="$2"
@@ -265,6 +302,7 @@ disown
 
 echo -e "\n>>>> Installing VLC"
 sudo apt-get install -y -qq vlc 2>/dev/null || true
+free_space
 
 echo -e "\n>>>> Installing quick reset command (x)"
 sudo cp "$SCRIPT_DIR/x" /usr/bin/x 2>/dev/null || true
@@ -286,6 +324,7 @@ wget -q https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn
 sudo dpkg -i ./protonvpn-stable-release_1.0.8_all.deb && sudo apt update
 sudo apt install -y proton-vpn-gnome-desktop gnome-shell-extension-appindicator
 rm -f protonvpn-stable-release_1.0.8_all.deb
+free_space
 
 echo -e "\n>>>> Cleanup"
 rm -rf /tmp/cubic2
