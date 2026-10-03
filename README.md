@@ -65,9 +65,44 @@ cubic2/
     ├── detect-device       # Picks the setup script from DMI info (run after clone)
     ├── setup-e6540         # Dell Latitude E6540 (HDMI); also the fallback for unknown devices
     ├── setup-optiplex7050  # Dell OptiPlex 7050 (DP/HDMI/VGA)
-    ├── setup-t450          # Lenovo ThinkPad T450/T450s (mini-DP/VGA, no HDMI)
+    ├── setup-t450          # Lenovo ThinkPad T450/T450s, live USB
+    ├── setup-t450-disk     # Lenovo ThinkPad T450/T450s, Ubuntu installed on internal drive
     └── x                   # Quick display/audio reset (installed to /usr/bin/x)
 ```
+
+## Installing to disk (T450)
+
+The live USB keeps every write in RAM, which is too tight on an 8 GB machine.
+For the T450, install Ubuntu on the internal drive instead, then freeze it with
+overlayroot so a reboot is still a full reset.
+
+1. Write the **stock** Ubuntu installer to a USB stick (the customised ISO has
+   the installer removed):
+   ```sh
+   ./make.sh usb-stock
+   ```
+2. Boot the T450 from it and install Ubuntu. In the installer:
+   - Choose **Erase disk**, or use manual partitioning with `/` (40 GB is plenty)
+     and a second ext4 partition mounted at `/data` for downloads. With `/data`,
+     downloads survive reboots after the freeze; without it they are wiped.
+   - Create the user and tick **Log in automatically**.
+3. After the first login, open a terminal and run:
+   ```sh
+   sudo apt install -y git
+   git clone https://github.com/tv6540/cubic2.git ~/cubic2
+   ~/cubic2/scripts/setup-t450-disk
+   ```
+4. Open Chrome from the dock, sign in, let it sync. Check the TV picture and sound.
+5. Freeze it so every reboot resets to this exact state:
+   ```sh
+   ~/cubic2/scripts/setup-t450-disk --freeze && sudo reboot
+   ```
+
+Day to day: anything goes wrong, reboot. To change something on a frozen system
+(update Chrome, add a package) run `sudo overlayroot-chroot`, make the change,
+`exit`, reboot. To make it writable again: `~/cubic2/scripts/setup-t450-disk --unfreeze`.
+If it ever fails to boot, hold Shift at GRUB, press `e` on the Ubuntu entry, add
+`overlayroot=disabled` to the `linux` line and press F10.
 
 ## Supported Devices
 

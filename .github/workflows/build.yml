@@ -20,6 +20,7 @@ jobs:
           bash -n scripts/setup-e6540
           bash -n scripts/setup-optiplex7050
           bash -n scripts/setup-t450
+          bash -n scripts/setup-t450-disk
           bash -n scripts/detect-device
           bash -n scripts/x
           bash -n pre-setup/setup
@@ -31,7 +32,7 @@ jobs:
       - name: Run shellcheck
         run: |
           echo "Running shellcheck (warnings only)..."
-          shellcheck -s bash -S warning make.sh docker-build.sh scripts/setup-e6540 scripts/setup-optiplex7050 scripts/setup-t450 scripts/detect-device scripts/x pre-setup/setup || true
+          shellcheck -s bash -S warning make.sh docker-build.sh scripts/setup-e6540 scripts/setup-optiplex7050 scripts/setup-t450 scripts/setup-t450-disk scripts/detect-device scripts/x pre-setup/setup || true
           echo "Shellcheck complete"
 
       - name: Validate Dockerfile

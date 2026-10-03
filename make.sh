@@ -18,6 +18,7 @@ print_usage() {
   echo "  download  Download Ubuntu ISO only"
   echo "  clean     Remove work directory and Docker image"
   echo "  usb       Write ISO to USB (interactive device selection)"
+  echo "  usb-stock Write the unmodified Ubuntu installer to USB (for installing to disk)"
   echo ""
   echo "Environment variables:"
   echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.3)"
@@ -168,11 +169,11 @@ select_usb_device() {
 write_usb() {
   local device="$1"
   local skip_confirm="$2"
-  local iso_path="$SCRIPT_DIR/$OUTPUT_ISO"
+  local iso_path="${3:-$SCRIPT_DIR/$OUTPUT_ISO}"
 
   if [ ! -f "$iso_path" ]; then
     echo "Error: ISO not found at $iso_path"
-    echo "Run '$0 build' first"
+    echo "Run '$0 build' first (or '$0 download' for the stock installer)"
     exit 1
   fi
 
@@ -318,6 +319,12 @@ case "${1:-all}" in
     ;;
   usb)
     write_usb "$2"
+    ;;
+  usb-stock)
+    # Unmodified Ubuntu installer, for installing to a machine's internal drive
+    # (the customised ISO has the installer removed). See README "Installing to disk".
+    download_iso
+    write_usb "$2" "" "$WORK_DIR/$ISO_NAME"
     ;;
   clean)
     clean

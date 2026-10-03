@@ -1,0 +1,224 @@
+#!/bin/bash
+# One-time setup for Ubuntu 24.04 INSTALLED on the ThinkPad T450's internal drive
+# (not the live USB). Run it once as the desktop user after the first login:
+#
+#   git clone https://github.com/tv6540/cubic2.git ~/cubic2 && ~/cubic2/scripts/setup-t450-disk
+#
+# Then sign in to Chrome, check the TV picture and sound, and when happy freeze
+# the system so every reboot is a clean reset:
+#
+#   ~/cubic2/scripts/setup-t450-disk --freeze
+#
+# Undo the freeze later with:  ~/cubic2/scripts/setup-t450-disk --unfreeze
+# Change a frozen system with: sudo overlayroot-chroot   (then apt/edit as usual, exit, reboot)
+#
+# Differences from the live script (setup-t450):
+#   - nothing is cloned or installed at boot; it all persists on disk
+#   - display + audio are re-applied at every login by /usr/bin/x via an autostart entry
+#   - Chrome autostarts at login
+#   - downloads go to /data if a separate partition is mounted there, else ~/Downloads
+#   - --freeze installs overlayroot (root filesystem read-only, writes to RAM, gone on reboot)
+set -e
+
+LOG_FILE="$HOME/setup-disk.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODE="${1:-setup}"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "=== setup-t450-disk ($MODE) started at $(date) ==="
+
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" -eq 0 ]; then
+  echo "Run this as your normal desktop user, not root (it uses sudo where needed)."
+  exit 1
+fi
+if grep -q "/cdrom" /proc/mounts 2>/dev/null && [ "$USER" = "ubuntu" ] && [ -d /rofs ]; then
+  echo "This looks like the live USB session. This script is for an installed system."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# --freeze / --unfreeze: overlayroot on/off
+# ---------------------------------------------------------------------------
+case "$MODE" in
+  --freeze)
+    echo ">>>> Installing overlayroot (root filesystem read-only, RAM overlay on top)"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq overlayroot
+    echo 'overlayroot="tmpfs"' | sudo tee /etc/overlayroot.conf >/dev/null
+
+    echo ">>>> Disabling swapfile (a swapfile cannot live on the RAM overlay)"
+    sudo swapoff /swapfile 2>/dev/null || true
+    sudo sed -i 's|^\(/swapfile.*\)$|#\1|' /etc/fstab
+
+    echo ">>>> Disabling background updaters (their downloads would only fill RAM each boot)"
+    sudo systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    sudo snap refresh --hold 2>/dev/null || true
+
+    echo ">>>> Rebuilding initramfs"
+    sudo update-initramfs -u
+
+    echo ""
+    echo "Frozen. Reboot now. From then on every reboot is a clean reset."
+    echo "  To change something later:  sudo overlayroot-chroot   (edit/apt inside, exit, reboot)"
+    echo "  To undo the freeze:          $0 --unfreeze"
+    echo "  Emergency unfreeze at boot:  hold Shift at GRUB, edit the entry, add  overlayroot=disabled"
+    echo "=== finished at $(date) ==="
+    exit 0
+    ;;
+  --unfreeze)
+    if command -v overlayroot-chroot >/dev/null 2>&1 && grep -q "overlayroot" /proc/mounts 2>/dev/null; then
+      echo ">>>> System is frozen; writing the change through overlayroot-chroot"
+      sudo overlayroot-chroot sh -c 'echo "overlayroot=\"\"" > /etc/overlayroot.conf; sed -i "s|^#\(/swapfile.*\)$|\1|" /etc/fstab; update-initramfs -u'
+    else
+      echo 'overlayroot=""' | sudo tee /etc/overlayroot.conf >/dev/null
+      sudo sed -i 's|^#\(/swapfile.*\)$|\1|' /etc/fstab
+      sudo update-initramfs -u
+    fi
+    echo "Unfrozen. Reboot for a writable system. Re-freeze with: $0 --freeze"
+    echo "=== finished at $(date) ==="
+    exit 0
+    ;;
+  setup) ;;
+  *)
+    echo "Usage: $0 [--freeze|--unfreeze]"
+    exit 1
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# One-time setup
+# ---------------------------------------------------------------------------
+echo -e "\n>>>> Device check"
+[ -x "$SCRIPT_DIR/detect-device" ] && echo "Detected: $("$SCRIPT_DIR/detect-device" --verbose)"
+
+echo -e "\n>>>> GDM: auto-login as $USER, X11 (xrandr needs X11, not Wayland)"
+sudo mkdir -p /etc/gdm3
+sudo tee /etc/gdm3/custom.conf >/dev/null << EOC
+[daemon]
+AutomaticLoginEnable=true
+AutomaticLogin=$USER
+WaylandEnable=false
+EOC
+
+echo -e "\n>>>> Set screen timeout to never, no lock, no sleep, ignore lid"
+gsettings set org.gnome.desktop.session idle-delay 0
+gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power lid-close-ac-action 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action 'nothing' 2>/dev/null || true
+for key in HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked; do
+  grep -q "^$key=ignore" /etc/systemd/logind.conf 2>/dev/null || \
+    echo "$key=ignore" | sudo tee -a /etc/systemd/logind.conf >/dev/null
+done
+sudo systemctl kill -s HUP systemd-logind 2>/dev/null || true
+
+echo -e "\n>>>> Dark theme"
+gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' 2>/dev/null || true
+
+echo -e "\n>>>> Set timezone to PT"
+sudo timedatectl set-timezone America/Los_Angeles
+
+echo -e "\n>>>> Package lists + small tools"
+sudo apt-get update -qq
+sudo apt-get install -y -qq curl wget git pulseaudio-utils
+
+echo -e "\n>>>> Installing quick reset command (x) and running it at every login"
+sudo cp "$SCRIPT_DIR/x" /usr/bin/x
+sudo chmod +x /usr/bin/x
+mkdir -p "$HOME/.config/autostart"
+cat > "$HOME/.config/autostart/x-display-audio.desktop" << 'EOD'
+[Desktop Entry]
+Type=Application
+Name=TV display and audio
+Exec=/usr/bin/x
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+NoDisplay=true
+EOD
+/usr/bin/x || echo "Warning: x reported a problem (TV not connected?), continuing"
+
+echo -e "\n>>>> Installing Chrome"
+cd /tmp
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb 2>/dev/null || sudo apt-get install -f -y
+rm -f google-chrome-stable_current_amd64.deb
+
+install_chrome_extension() {
+  local ext_id="$1" ext_name="$2"
+  sudo mkdir -p /opt/google/chrome/extensions
+  echo "{\"external_update_url\":\"https://clients2.google.com/service/update2/crx\"}" | \
+    sudo tee "/opt/google/chrome/extensions/$ext_id.json" > /dev/null
+  echo "  Installed: $ext_name"
+}
+echo -e "\n>>>> Installing Chrome extensions"
+install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
+install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube Ads"
+
+echo -e "\n>>>> Chrome policies (download dir, no privacy-sandbox prompts)"
+DOWNLOAD_DIR="$HOME/Downloads"
+if mountpoint -q /data 2>/dev/null; then
+  sudo mkdir -p /data/chrome-dl
+  sudo chown "$USER:$USER" /data/chrome-dl
+  DOWNLOAD_DIR="/data/chrome-dl"
+  echo "Separate /data partition found; downloads persist there even when frozen"
+else
+  echo "No /data partition; downloads go to ~/Downloads (lost on reboot once frozen)"
+fi
+sudo mkdir -p /etc/opt/chrome/policies/managed
+sudo tee /etc/opt/chrome/policies/managed/custom_policy.json >/dev/null << EOP
+{
+  "DownloadDirectory": "$DOWNLOAD_DIR",
+  "PrivacySandboxPromptEnabled": false,
+  "PrivacySandboxAdMeasurementEnabled": false,
+  "PrivacySandboxAdTopicsEnabled": false,
+  "PrivacySandboxSiteEnabledAdsEnabled": false
+}
+EOP
+echo "Chrome download dir: $DOWNLOAD_DIR"
+
+echo -e "\n>>>> Chrome autostart at login"
+cat > "$HOME/.config/autostart/google-chrome.desktop" << 'EOD'
+[Desktop Entry]
+Type=Application
+Name=Google Chrome
+Exec=google-chrome-stable --no-first-run --no-default-browser-check --disable-session-crashed-bubble --start-maximized
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=8
+EOD
+
+echo -e "\n>>>> Installing VLC"
+sudo apt-get install -y -qq vlc
+mkdir -p "$HOME/.config/vlc"
+printf '[qt]\nqt-privacy-ask=0\nmetadata-network-access=0\n' > "$HOME/.config/vlc/vlcrc"
+
+echo -e "\n>>>> Proton VPN"
+cd /tmp
+wget -q https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
+sudo dpkg -i ./protonvpn-stable-release_1.0.8_all.deb && sudo apt-get update -qq
+sudo apt-get install -y -qq proton-vpn-gnome-desktop gnome-shell-extension-appindicator
+rm -f protonvpn-stable-release_1.0.8_all.deb
+
+echo -e "\n>>>> Dock favorites"
+gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']" 2>/dev/null || true
+
+echo -e "\n>>>> Security hardening"
+sudo ufw default deny incoming >/dev/null 2>&1 || true
+sudo ufw default allow outgoing >/dev/null 2>&1 || true
+sudo ufw --force enable >/dev/null 2>&1 || true
+sudo systemctl disable --now ssh 2>/dev/null || true
+sudo systemctl disable --now bluetooth 2>/dev/null || true
+
+echo -e "\n>>>> Cleanup"
+sudo apt-get clean
+
+echo -e "\n>>>> Setup complete"
+echo "Next:"
+echo "  1. Open Chrome (dock), sign in, let it sync, confirm the TV picture and sound."
+echo "  2. When happy, freeze so every reboot resets to this state:"
+echo "       $0 --freeze && sudo reboot"
+echo "=== finished at $(date) ==="
