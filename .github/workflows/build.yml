@@ -18,6 +18,9 @@ jobs:
           bash -n make.sh
           bash -n docker-build.sh
           bash -n scripts/setup-e6540
+          bash -n scripts/setup-optiplex7050
+          bash -n scripts/setup-t450
+          bash -n scripts/detect-device
           bash -n scripts/x
           bash -n pre-setup/setup
           echo "All scripts pass syntax check"
@@ -28,7 +31,7 @@ jobs:
       - name: Run shellcheck
         run: |
           echo "Running shellcheck (warnings only)..."
-          shellcheck -s bash -S warning make.sh docker-build.sh scripts/setup-e6540 scripts/x pre-setup/setup || true
+          shellcheck -s bash -S warning make.sh docker-build.sh scripts/setup-e6540 scripts/setup-optiplex7050 scripts/setup-t450 scripts/detect-device scripts/x pre-setup/setup || true
           echo "Shellcheck complete"
 
       - name: Validate Dockerfile

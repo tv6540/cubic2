@@ -1,0 +1,40 @@
+#!/bin/bash
+# Prints the name of the setup script to run for the current machine.
+#
+# Lives in the repo (not the ISO) so adding a new device only needs a git push,
+# not an ISO rebuild. The ISO bootstrap (pre-setup/setup) calls this after cloning.
+#
+# Usage: scripts/detect-device            -> prints e.g. "setup-t450"
+#        scripts/detect-device --verbose  -> also prints the DMI strings to stderr
+#
+# Dell puts the model in product_name ("Latitude E6540", "OptiPlex 7050").
+# Lenovo puts a machine-type code in product_name ("20BV0005US") and the
+# human name in product_version / product_family ("ThinkPad T450").
+# We match against all three so either vendor style works.
+
+read_dmi() {
+  cat "/sys/class/dmi/id/$1" 2>/dev/null | tr -d '\n'
+}
+
+VENDOR=$(read_dmi sys_vendor)
+PRODUCT_NAME=$(read_dmi product_name)
+PRODUCT_VERSION=$(read_dmi product_version)
+PRODUCT_FAMILY=$(read_dmi product_family)
+DEVICE_INFO="$VENDOR | $PRODUCT_NAME | $PRODUCT_VERSION | $PRODUCT_FAMILY"
+
+if [ "$1" = "--verbose" ]; then
+  echo "DMI: $DEVICE_INFO" >&2
+fi
+
+case "$DEVICE_INFO" in
+  *OptiPlex\ 7050*)
+    echo "setup-optiplex7050" ;;
+  *Latitude\ E6540*)
+    echo "setup-e6540" ;;
+  *ThinkPad\ T450*|*T450*)
+    # Matches "ThinkPad T450" and "ThinkPad T450s"
+    echo "setup-t450" ;;
+  *)
+    echo "Unknown device ($DEVICE_INFO), defaulting to setup-e6540" >&2
+    echo "setup-e6540" ;;
+esac

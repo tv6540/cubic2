@@ -1,0 +1,289 @@
+#!/bin/bash
+# Setup for Lenovo ThinkPad T450 / T450s used as a TV box.
+#
+# Hardware notes (differs from the Dell E6540):
+#   - DMI product_name is a machine-type code (e.g. 20BUS61X00); the human name
+#     "ThinkPad T450" is in product_version / product_family. See scripts/detect-device.
+#   - No HDMI port. TV is attached via mini-DisplayPort (shows as DP-1/DP-2 in xrandr)
+#     or VGA. Nothing is hardcoded: the first connected non-internal output is used.
+#   - Internal panel is eDP-1 (Intel i915). Disabled so the lid can stay closed.
+#   - Has a battery, so GNOME power/lid settings are forced to "do nothing" on AC.
+set -e
+
+LOG_FILE="$HOME/setup.log"
+
+# Upload logs to dpaste on exit (success or failure) for remote diagnostics
+upload_logs() {
+  echo -e "\n>>>> Uploading logs for diagnostics..."
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "Log upload skipped: $LOG_FILE not found"
+    return
+  fi
+  if ! command -v curl &>/dev/null; then
+    echo "Log upload skipped: curl not available"
+    return
+  fi
+  LOG_URL=$(curl -s --max-time 15 -F "content=<$LOG_FILE" -F "expiry_days=1" https://dpaste.com/api/v2/ 2>/dev/null)
+  if [ -n "$LOG_URL" ]; then
+    echo "Log URL: $LOG_URL" >> "$LOG_FILE"
+    echo ""
+    echo "============================================"
+    echo "  SETUP LOG UPLOADED"
+    echo "  $LOG_URL"
+    echo "============================================"
+    echo ""
+    echo "Terminal will close in 10 minutes..."
+    echo "(Press Ctrl+C to close now)"
+    sleep 600
+  else
+    echo "Log upload failed (dpaste unreachable or timeout)"
+    echo "Local log available at: $LOG_FILE"
+    sleep 60
+  fi
+}
+trap upload_logs EXIT
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "=== Setup started at $(date) ==="
+
+echo -e ">>>> Device check"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$SCRIPT_DIR/detect-device" ]; then
+  DETECTED=$("$SCRIPT_DIR/detect-device" --verbose)
+  echo "Detected: $DETECTED"
+  if [ "$DETECTED" != "setup-t450" ]; then
+    echo "Warning: this is the T450 script but the machine looks like '$DETECTED'. Continuing anyway."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Display: pick the external output, disable the internal panel
+# ---------------------------------------------------------------------------
+echo -e "\n>>>> Detecting displays"
+INTERNAL_OUTPUT=$(xrandr 2>/dev/null | grep -E "^(eDP|LVDS)" | awk '{print $1}' | head -1)
+EXTERNAL_OUTPUT=$(xrandr 2>/dev/null | grep " connected" | grep -vE "^(eDP|LVDS)" | awk '{print $1}' | head -1)
+echo "Internal panel: ${INTERNAL_OUTPUT:-none}"
+echo "External output: ${EXTERNAL_OUTPUT:-none}"
+
+# Try modes in order of preference; the first one the TV accepts wins.
+# 1366x768 was verified manually on the T450's TV (correct 16:9 picture).
+# "--auto" falls back to the output's preferred mode, so this never leaves the
+# TV blank the way a hardcoded 1600x900 did on the first T450 boot.
+# The mode that worked is saved to /etc/cubic2-tv-mode so `x` can reuse it.
+set_external_mode() {
+  local output="$1" mode
+  for mode in 1366x768 1920x1080 1600x900; do
+    if xrandr --output "$output" --primary --mode "$mode" 2>/dev/null; then
+      echo "Set $output to $mode"
+      echo "$mode" | sudo tee /etc/cubic2-tv-mode >/dev/null 2>&1 || true
+      return 0
+    fi
+    echo "  $mode not available on $output"
+  done
+  xrandr --output "$output" --primary --auto && echo "Set $output to its preferred mode"
+}
+
+if [ -n "$EXTERNAL_OUTPUT" ]; then
+  set_external_mode "$EXTERNAL_OUTPUT" || echo "Warning: could not set a mode on $EXTERNAL_OUTPUT"
+  if [ -n "$INTERNAL_OUTPUT" ]; then
+    echo "Disabling internal panel $INTERNAL_OUTPUT"
+    xrandr --output "$INTERNAL_OUTPUT" --off 2>/dev/null || true
+  fi
+else
+  echo "Warning: no external display connected, keeping internal panel on"
+fi
+
+echo -e "\n>>>> Set screen timeout to never"
+gsettings set org.gnome.desktop.session idle-delay 0
+
+echo -e "\n>>>> Never sleep or act on lid close (laptop on AC with lid shut)"
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power lid-close-ac-action 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action 'nothing' 2>/dev/null || true
+
+echo -e "\n>>>> Ignore Lid Switch (logind)"
+for key in HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked; do
+  grep -q "^$key=ignore" /etc/systemd/logind.conf 2>/dev/null || \
+    echo "$key=ignore" | sudo tee -a /etc/systemd/logind.conf >/dev/null
+done
+# SIGHUP makes logind re-read its config without restarting it (safe mid-session)
+sudo systemctl kill -s HUP systemd-logind 2>/dev/null || true
+
+echo -e "\n>>>> Set audio output (HDMI / DisplayPort)"
+# Audio: GNOME Sound showed the working setup as
+#   Output device:  "HDMI / DisplayPort - Built-in Audio"
+#   Configuration:  "Digital Stereo (HDMI) Output"
+# "Configuration" is the PipeWire card profile. Until a card is on an HDMI
+# profile there is no HDMI sink at all, so switch the profile first, then pick
+# the sink. Mini-DisplayPort audio on Intel shows up under the "hdmi" name.
+set_hdmi_audio() {
+  local sink card profile input
+
+  sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|dp" | head -1 | awk '{print $2}')
+  if [ -z "$sink" ]; then
+    echo "No HDMI sink yet, switching card profile to Digital Stereo (HDMI) Output"
+    # Prefer an HDMI profile the card reports as available (TV on and plugged in);
+    # fall back to the first HDMI stereo profile on any card.
+    read -r card profile < <(pactl list cards 2>/dev/null | awk '
+      /^\tName:/ {card=$2}
+      /^\t\toutput:hdmi-stereo/ && /available: yes/ {p=$1; sub(":$","",p); print card, p; exit}')
+    if [ -z "$profile" ]; then
+      read -r card profile < <(pactl list cards 2>/dev/null | awk '
+        /^\tName:/ {card=$2}
+        /^\t\toutput:hdmi-stereo/ {p=$1; sub(":$","",p); print card, p; exit}')
+    fi
+    if [ -n "$card" ] && [ -n "$profile" ]; then
+      echo "  $card -> $profile"
+      pactl set-card-profile "$card" "$profile" 2>/dev/null || true
+      sleep 2
+      sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|dp" | head -1 | awk '{print $2}')
+    else
+      echo "  No HDMI profile found on any card"
+    fi
+  fi
+
+  if [ -n "$sink" ]; then
+    pactl set-default-sink "$sink"
+    # Move anything already playing over to the TV
+    for input in $(pactl list short sink-inputs 2>/dev/null | cut -f1); do
+      pactl move-sink-input "$input" "$sink" 2>/dev/null || true
+    done
+    echo "Audio set to: $sink"
+  else
+    echo "Warning: no HDMI/DP audio sink found, using default"
+  fi
+}
+set_hdmi_audio
+
+echo -e "\n>>>> Set timezone to PT"
+sudo timedatectl set-timezone America/Los_Angeles
+
+echo -e "\n>>>> Activating wired ethernet"
+dev=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet' | cut -d: -f1 | head -1)
+[ -n "$dev" ] && nmcli device connect "$dev" 2>/dev/null || true
+
+echo -e "\n>>>> Mounting internal drives"
+FIRST_MOUNT=""
+for dev in $(lsblk -rno NAME,TYPE,RM,MOUNTPOINT 2>/dev/null | awk '$2=="part" && $3=="0" && $4=="" {print $1}'); do
+  devpath="/dev/$dev"
+  if mount | grep -q "^$devpath"; then
+    mp=$(mount | grep "^$devpath" | awk '{print $3}')
+    echo "  $dev already at $mp"
+    [ -z "$FIRST_MOUNT" ] && FIRST_MOUNT="$mp"
+  elif mp=$(udisksctl mount -b "$devpath" 2>/dev/null | grep -oP "at \K/.*"); then
+    echo "  Mounted $dev at $mp"
+    [ -z "$FIRST_MOUNT" ] && FIRST_MOUNT="$mp"
+  fi
+done
+[ -n "$FIRST_MOUNT" ] && echo "First mount: $FIRST_MOUNT"
+
+echo -e "\n>>>> Upgrading system packages (required for Chrome)"
+sudo apt-get update -qq
+sudo apt-get upgrade -y -qq
+
+echo -e "\n>>>> Installing Chrome"
+cd /tmp
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb 2>/dev/null || sudo apt-get install -f -y
+rm -f google-chrome-stable_current_amd64.deb
+
+install_chrome_extension() {
+  local ext_id="$1" ext_name="$2"
+  sudo mkdir -p /opt/google/chrome/extensions
+  echo "{\"external_update_url\":\"https://clients2.google.com/service/update2/crx\"}" | \
+    sudo tee "/opt/google/chrome/extensions/$ext_id.json" > /dev/null
+  echo "  Installed: $ext_name"
+}
+
+echo -e "\n>>>> Installing Chrome extensions"
+install_chrome_extension "cfhdojbkjhnklbpkdaibdccddilifddb" "Adblock Plus"
+install_chrome_extension "hmbnhhcgiecenbbkgdoaoafjpeaboine" "Autoskip for Youtube Ads"
+
+# Set Chrome download directory via policy (Preferences gets overwritten on first run)
+# Priority: 1) First mounted internal drive 2) Any drive with >100GB free 3) Skip policy (use Chrome default)
+set_chrome_download_dir() {
+  local DOWNLOAD_DIR=""
+
+  if [ -n "$FIRST_MOUNT" ] && mountpoint -q "$FIRST_MOUNT" 2>/dev/null; then
+    local free_kb
+    free_kb=$(df -k "$FIRST_MOUNT" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_kb" ] && [ "$free_kb" -gt 104857600 ] 2>/dev/null; then
+      DOWNLOAD_DIR="$FIRST_MOUNT/chrome-dl"
+      echo "Using first mount with $(( free_kb / 1024 / 1024 ))GB free: $FIRST_MOUNT"
+    fi
+  fi
+
+  if [ -z "$DOWNLOAD_DIR" ]; then
+    echo "Scanning for large drives..."
+    while IFS= read -r mount_point; do
+      case "$mount_point" in
+        /|/boot*|/snap*|/sys*|/proc*|/dev*|/run*|/cdrom*) continue ;;
+      esac
+      local free_kb
+      free_kb=$(df -k "$mount_point" 2>/dev/null | awk 'NR==2 {print $4}')
+      if [ -n "$free_kb" ] && [ "$free_kb" -gt 104857600 ] 2>/dev/null; then
+        DOWNLOAD_DIR="$mount_point/chrome-dl"
+        echo "Found drive with $(( free_kb / 1024 / 1024 ))GB free: $mount_point"
+        break
+      fi
+    done < <(df --output=target 2>/dev/null | tail -n +2)
+  fi
+
+  if [ -n "$DOWNLOAD_DIR" ]; then
+    if mkdir -p "$DOWNLOAD_DIR" 2>/dev/null && [ -w "$DOWNLOAD_DIR" ]; then
+      sudo mkdir -p /etc/opt/chrome/policies/managed
+      sudo tee /etc/opt/chrome/policies/managed/download_policy.json > /dev/null << EOP
+{
+  "DownloadDirectory": "$DOWNLOAD_DIR"
+}
+EOP
+      echo "Chrome download dir (policy): $DOWNLOAD_DIR"
+    else
+      echo "Warning: Could not create $DOWNLOAD_DIR, using Chrome default"
+    fi
+  else
+    echo "No suitable drive found (>100GB free), using Chrome default download location"
+  fi
+}
+set_chrome_download_dir
+
+echo -e "\n>>>> Launching Chrome"
+nohup google-chrome-stable \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-session-crashed-bubble \
+  --start-maximized \
+  "https://accounts.google.com/AccountChooser?Email=anandchakru.forum@gmail.com&continue=https://mail.google.com/" \
+  > /dev/null 2>&1 &
+disown
+
+echo -e "\n>>>> Installing VLC"
+sudo apt-get install -y -qq vlc 2>/dev/null || true
+
+echo -e "\n>>>> Installing quick reset command (x)"
+sudo cp "$SCRIPT_DIR/x" /usr/bin/x 2>/dev/null || true
+sudo chmod +x /usr/bin/x 2>/dev/null || true
+
+echo -e "\n>>>> Setting dock favorites"
+gsettings set org.gnome.shell favorite-apps "['google-chrome.desktop', 'vlc.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop']" 2>/dev/null || true
+
+echo -e "\n>>>> Security hardening"
+sudo ufw default deny incoming >/dev/null 2>&1 || true
+sudo ufw default allow outgoing >/dev/null 2>&1 || true
+sudo ufw --force enable >/dev/null 2>&1 || true
+sudo systemctl disable --now ssh 2>/dev/null || true
+sudo systemctl disable --now bluetooth 2>/dev/null || true
+sudo mount -o remount,ro /cdrom 2>/dev/null || true
+
+echo -e "\n>>>> Proton"
+wget -q https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
+sudo dpkg -i ./protonvpn-stable-release_1.0.8_all.deb && sudo apt update
+sudo apt install -y proton-vpn-gnome-desktop gnome-shell-extension-appindicator
+rm -f protonvpn-stable-release_1.0.8_all.deb
+
+echo -e "\n>>>> Cleanup"
+rm -rf /tmp/cubic2
+
+echo -e "\n>>>> Setup complete!"
+echo "=== Setup finished at $(date) ==="

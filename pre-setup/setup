@@ -92,22 +92,25 @@ main() {
   git clone -q "$REPO_URL" "$SETUP_DIR"
 
   echo "Detecting device..."
-  PRODUCT_NAME=$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo "Unknown")
-  echo "Device: $PRODUCT_NAME"
-
-  # Select setup script based on device model
-  case "$PRODUCT_NAME" in
-    *OptiPlex\ 7050*)
-      SETUP_SCRIPT="setup-optiplex7050"
-      ;;
-    *Latitude\ E6540*)
-      SETUP_SCRIPT="setup-e6540"
-      ;;
-    *)
-      echo "Unknown device, using E6540 config as default"
-      SETUP_SCRIPT="setup-e6540"
-      ;;
-  esac
+  # Detection lives in the repo (scripts/detect-device) so new machines only need
+  # a git push, not an ISO rebuild. Lenovo puts the model in product_version,
+  # Dell in product_name; the helper checks both.
+  if [ -f "$SETUP_DIR/scripts/detect-device" ]; then
+    chmod +x "$SETUP_DIR/scripts/detect-device"
+    SETUP_SCRIPT=$("$SETUP_DIR/scripts/detect-device" --verbose)
+  else
+    PRODUCT_NAME=$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo "Unknown")
+    echo "Device: $PRODUCT_NAME (detect-device missing, using built-in fallback)"
+    case "$PRODUCT_NAME" in
+      *OptiPlex\ 7050*)  SETUP_SCRIPT="setup-optiplex7050" ;;
+      *Latitude\ E6540*) SETUP_SCRIPT="setup-e6540" ;;
+      *)
+        echo "Unknown device, using E6540 config as default"
+        SETUP_SCRIPT="setup-e6540"
+        ;;
+    esac
+  fi
+  echo "Selected: $SETUP_SCRIPT"
 
   echo "Running $SETUP_SCRIPT..."
   chmod +x "$SETUP_DIR/scripts/$SETUP_SCRIPT"

@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# This script is the fallback the ISO bootstrap runs for any unrecognised machine.
+# ISOs built before scripts/detect-device existed cannot recognise newer devices
+# (e.g. the ThinkPad T450 reports product_name "20BUS61X00"), so re-check here
+# and hand off to the right script. Avoids rebuilding the USB for every new device.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "$CUBIC2_DISPATCHED" ] && [ -x "$SCRIPT_DIR/detect-device" ]; then
+  DETECTED=$("$SCRIPT_DIR/detect-device" --verbose)
+  if [ "$DETECTED" != "setup-e6540" ] && [ -f "$SCRIPT_DIR/$DETECTED" ]; then
+    echo "Detected $DETECTED, handing off from setup-e6540..."
+    chmod +x "$SCRIPT_DIR/$DETECTED"
+    CUBIC2_DISPATCHED=1 exec "$SCRIPT_DIR/$DETECTED"
+  fi
+fi
+
 LOG_FILE="$HOME/setup.log"
 
 # Upload logs to dpaste on exit (success or failure) for remote diagnostics

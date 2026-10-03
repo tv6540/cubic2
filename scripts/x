@@ -1,23 +1,82 @@
 #!/bin/bash
-# Quick display/audio reset - same as v1
+# Quick display/audio reset. Installed to /usr/bin/x by the setup scripts.
+# Detects outputs instead of hardcoding HDMI-1, so it works on the E6540 (HDMI),
+# OptiPlex (DP/HDMI) and T450 (mini-DP / VGA) alike.
 
-echo -e ">>>> TV resolution to 1600x900"
-xrandr --output HDMI-1 --primary --mode 1600x900
+echo -e ">>>> Detecting displays"
+INTERNAL_OUTPUT=$(xrandr 2>/dev/null | grep -E "^(eDP|LVDS)" | awk '{print $1}' | head -1)
+EXTERNAL_OUTPUT=$(xrandr 2>/dev/null | grep " connected" | grep -vE "^(eDP|LVDS)" | awk '{print $1}' | head -1)
+echo "Internal panel: ${INTERNAL_OUTPUT:-none}"
+echo "External output: ${EXTERNAL_OUTPUT:-none}"
 
-echo -e "\n>>>> Disable internal monitor"
-xrandr --output eDP-1 --off
+if [ -n "$EXTERNAL_OUTPUT" ]; then
+  echo -e "\n>>>> Setting TV resolution on $EXTERNAL_OUTPUT"
+  # Prefer the mode the setup script verified for this TV, then the usual candidates
+  SAVED_MODE=$(cat /etc/cubic2-tv-mode 2>/dev/null)
+  for mode in $SAVED_MODE 1600x900 1366x768 1920x1080; do
+    if xrandr --output "$EXTERNAL_OUTPUT" --primary --mode "$mode" 2>/dev/null; then
+      echo "Set $EXTERNAL_OUTPUT to $mode"
+      SET_OK=1
+      break
+    fi
+  done
+  [ -n "$SET_OK" ] || xrandr --output "$EXTERNAL_OUTPUT" --primary --auto
+
+  if [ -n "$INTERNAL_OUTPUT" ]; then
+    echo -e "\n>>>> Disable internal monitor $INTERNAL_OUTPUT"
+    xrandr --output "$INTERNAL_OUTPUT" --off
+  fi
+else
+  echo "Warning: no external display connected"
+fi
 
 echo -e "\n>>>> Set screen timeout to never"
 gsettings set org.gnome.desktop.session idle-delay 0
 
-echo -e "\n>>>> Set HDMI audio"
-# Ubuntu 24.04 uses PipeWire - use pactl (pacmd is deprecated)
-HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | awk '{print $2}')
-if [ -n "$HDMI_SINK" ]; then
-  pactl set-default-sink "$HDMI_SINK"
-  echo "HDMI audio set: $HDMI_SINK"
-else
-  echo "Warning: No HDMI sink found"
-fi
+echo -e "\n>>>> Set HDMI/DP audio"
+# Audio: GNOME Sound showed the working setup as
+#   Output device:  "HDMI / DisplayPort - Built-in Audio"
+#   Configuration:  "Digital Stereo (HDMI) Output"
+# "Configuration" is the PipeWire card profile. Until a card is on an HDMI
+# profile there is no HDMI sink at all, so switch the profile first, then pick
+# the sink. Mini-DisplayPort audio on Intel shows up under the "hdmi" name.
+set_hdmi_audio() {
+  local sink card profile input
+
+  sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|dp" | head -1 | awk '{print $2}')
+  if [ -z "$sink" ]; then
+    echo "No HDMI sink yet, switching card profile to Digital Stereo (HDMI) Output"
+    # Prefer an HDMI profile the card reports as available (TV on and plugged in);
+    # fall back to the first HDMI stereo profile on any card.
+    read -r card profile < <(pactl list cards 2>/dev/null | awk '
+      /^\tName:/ {card=$2}
+      /^\t\toutput:hdmi-stereo/ && /available: yes/ {p=$1; sub(":$","",p); print card, p; exit}')
+    if [ -z "$profile" ]; then
+      read -r card profile < <(pactl list cards 2>/dev/null | awk '
+        /^\tName:/ {card=$2}
+        /^\t\toutput:hdmi-stereo/ {p=$1; sub(":$","",p); print card, p; exit}')
+    fi
+    if [ -n "$card" ] && [ -n "$profile" ]; then
+      echo "  $card -> $profile"
+      pactl set-card-profile "$card" "$profile" 2>/dev/null || true
+      sleep 2
+      sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|dp" | head -1 | awk '{print $2}')
+    else
+      echo "  No HDMI profile found on any card"
+    fi
+  fi
+
+  if [ -n "$sink" ]; then
+    pactl set-default-sink "$sink"
+    # Move anything already playing over to the TV
+    for input in $(pactl list short sink-inputs 2>/dev/null | cut -f1); do
+      pactl move-sink-input "$input" "$sink" 2>/dev/null || true
+    done
+    echo "Audio set to: $sink"
+  else
+    echo "Warning: no HDMI/DP audio sink found, using default"
+  fi
+}
+set_hdmi_audio
 
 echo -e "\n>>>> Done"

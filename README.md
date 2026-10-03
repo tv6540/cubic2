@@ -62,9 +62,29 @@ cubic2/
 │   ├── setup         # Bootstrap script (runs on boot)
 │   └── setup.desktop # GNOME autostart entry
 └── scripts/
-    ├── setup-e6540   # Main configuration script
-    └── x             # Quick display/audio reset (installed to /usr/bin/x)
+    ├── detect-device       # Picks the setup script from DMI info (run after clone)
+    ├── setup-e6540         # Dell Latitude E6540 (HDMI); also the fallback for unknown devices
+    ├── setup-optiplex7050  # Dell OptiPlex 7050 (DP/HDMI/VGA)
+    ├── setup-t450          # Lenovo ThinkPad T450/T450s (mini-DP/VGA, no HDMI)
+    └── x                   # Quick display/audio reset (installed to /usr/bin/x)
 ```
+
+## Supported Devices
+
+Device detection reads `/sys/class/dmi/id/{product_name,product_version,product_family}`.
+Dell reports the model in `product_name`; Lenovo reports a machine-type code there
+(e.g. `20BUS61X00`) and the model in `product_version`.
+
+| Device | DMI match | Script |
+|--------|-----------|--------|
+| Dell Latitude E6540 | `Latitude E6540` | `setup-e6540` |
+| Dell OptiPlex 7050 | `OptiPlex 7050` | `setup-optiplex7050` |
+| Lenovo ThinkPad T450 / T450s | `ThinkPad T450` | `setup-t450` |
+| Anything else | – | `setup-e6540` (which re-runs detection and hands off) |
+
+To add a device: add a case to `scripts/detect-device`, add a `scripts/setup-<name>`,
+and push. Existing USB sticks pick it up on next boot because the scripts are cloned
+from GitHub at runtime; no ISO rebuild is needed.
 
 ## Use Case
 
