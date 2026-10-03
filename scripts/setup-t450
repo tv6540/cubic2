@@ -123,17 +123,22 @@ set_hdmi_audio() {
   sink=$(pactl list short sinks 2>/dev/null | grep -iE "hdmi|dp" | head -1 | awk '{print $2}')
   if [ -z "$sink" ]; then
     echo "No HDMI sink yet, switching card profile to Digital Stereo (HDMI) Output"
-    # Prefer an HDMI profile the card reports as available (TV on and plugged in);
-    # fall back to the first HDMI stereo profile on any card.
-    read -r card profile < <(pactl list cards 2>/dev/null | awk '
-      /^\tName:/ {card=$2}
-      /^\t\toutput:hdmi-stereo/ && /available: yes/ {p=$1; sub(":$","",p); print card, p; exit}')
-    if [ -z "$profile" ]; then
-      read -r card profile < <(pactl list cards 2>/dev/null | awk '
-        /^\tName:/ {card=$2}
-        /^\t\toutput:hdmi-stereo/ {p=$1; sub(":$","",p); print card, p; exit}')
-    fi
-    if [ -n "$card" ] && [ -n "$profile" ]; then
+    local cards pick
+    cards=$(pactl list cards 2>/dev/null || true)
+    # Log cards and profiles so a failed run shows what PipeWire reported
+    echo "$cards" | grep -E "^[[:space:]]+(Name:|output:)" | sed 's/^[[:space:]]*/    /' || true
+    # Pick an HDMI output profile: prefer one marked "available: yes", else any.
+    # Never use `read` here: with set -e an empty pipeline would abort the script.
+    pick=$(echo "$cards" | awk '
+      /^[ \t]+Name:/ {card=$2}
+      /^[ \t]+output:[^ ]*hdmi/ && /sinks:/ {
+        p=$1; sub(":$","",p)
+        if ($0 ~ /available: yes/) { if (!a) a=card" "p } else { if (!b) b=card" "p }
+      }
+      END { print (a != "" ? a : b) }')
+    card=${pick%% *}
+    profile=${pick#* }
+    if [ -n "$card" ] && [ -n "$profile" ] && [ "$card" != "$profile" ]; then
       echo "  $card -> $profile"
       pactl set-card-profile "$card" "$profile" 2>/dev/null || true
       sleep 2
@@ -154,7 +159,7 @@ set_hdmi_audio() {
     echo "Warning: no HDMI/DP audio sink found, using default"
   fi
 }
-set_hdmi_audio
+set_hdmi_audio || echo "Warning: audio setup failed, continuing"
 
 echo -e "\n>>>> Set timezone to PT"
 sudo timedatectl set-timezone America/Los_Angeles
