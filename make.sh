@@ -3,10 +3,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$SCRIPT_DIR/work"
-UBUNTU_VERSION="${UBUNTU_VERSION:-24.04.3}"
+UBUNTU_VERSION="${UBUNTU_VERSION:-24.04.5.1}"
 UBUNTU_URL="https://releases.ubuntu.com/${UBUNTU_VERSION}/ubuntu-${UBUNTU_VERSION}-desktop-amd64.iso"
 ISO_NAME="ubuntu-${UBUNTU_VERSION}-desktop-amd64.iso"
-OUTPUT_ISO="ubuntu-${UBUNTU_VERSION}-e6540.iso"
+OUTPUT_ISO="ubuntu-${UBUNTU_VERSION}-tv.iso"
 DOCKER_IMAGE="cubic2-builder"
 
 print_usage() {
@@ -21,7 +21,7 @@ print_usage() {
   echo "  usb-stock Write the unmodified Ubuntu installer to USB (for installing to disk)"
   echo ""
   echo "Environment variables:"
-  echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.3)"
+  echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.4)"
   echo ""
   echo "Examples:"
   echo "  $0                    # Clean, build, and write to USB"
@@ -49,6 +49,30 @@ check_docker() {
   fi
 }
 
+# Size of the Ubuntu ISO in bytes, from the server (falls back to 6 GB if unknown)
+iso_size_bytes() {
+  local cl
+  cl=$(curl -sIL --max-time 20 "$UBUNTU_URL" 2>/dev/null | awk 'tolower($1)=="content-length:" {cl=$2} END{print cl}' | tr -d '\r')
+  [[ "$cl" =~ ^[0-9]+$ ]] && [ "$cl" -gt 0 ] && echo "$cl" || echo $((6 * 1024 * 1024 * 1024))
+}
+
+# check_disk_space <bytes needed> <what for>
+# Aborts before any long download/build if the volume holding this repo is short.
+check_disk_space() {
+  local need_bytes="$1" purpose="$2" avail_kb need_kb
+  mkdir -p "$WORK_DIR"
+  avail_kb=$(df -k "$WORK_DIR" | awk 'NR==2 {print $4}')
+  need_kb=$(( need_bytes / 1024 ))
+  if [ -z "$avail_kb" ] || [ "$avail_kb" -lt "$need_kb" ]; then
+    echo "Error: not enough disk space for $purpose."
+    echo "  Needed:    $(( need_kb / 1024 / 1024 )) GB"
+    echo "  Available: $(( ${avail_kb:-0} / 1024 / 1024 )) GB on $(df -k "$WORK_DIR" | awk 'NR==2 {print $NF}')"
+    echo "  Free up space (old ISOs in $SCRIPT_DIR and $WORK_DIR are a good start) and retry."
+    exit 1
+  fi
+  echo "Disk space OK: $(( avail_kb / 1024 / 1024 )) GB available, $(( need_kb / 1024 / 1024 )) GB needed for $purpose"
+}
+
 download_iso() {
   mkdir -p "$WORK_DIR"
 
@@ -59,15 +83,29 @@ download_iso() {
 
   echo "Downloading Ubuntu $UBUNTU_VERSION..."
   echo "URL: $UBUNTU_URL"
+  local iso_bytes
+  iso_bytes=$(iso_size_bytes)
+  check_disk_space $(( iso_bytes + iso_bytes / 10 )) "downloading the ISO ($(( iso_bytes / 1024 / 1024 / 1024 )) GB)"
 
+  # -f makes curl fail on HTTP errors instead of saving the error page as the ISO
   if command -v curl &> /dev/null; then
-    curl -L -o "$WORK_DIR/$ISO_NAME" "$UBUNTU_URL"
+    curl -fL -o "$WORK_DIR/$ISO_NAME.part" "$UBUNTU_URL"
   elif command -v wget &> /dev/null; then
-    wget -O "$WORK_DIR/$ISO_NAME" "$UBUNTU_URL"
+    wget -O "$WORK_DIR/$ISO_NAME.part" "$UBUNTU_URL"
   else
     echo "Error: Neither curl nor wget found"
     exit 1
   fi
+
+  # A real desktop ISO is several GB; anything small is an error page or a partial file
+  local size
+  size=$(stat -f%z "$WORK_DIR/$ISO_NAME.part" 2>/dev/null || stat -c%s "$WORK_DIR/$ISO_NAME.part" 2>/dev/null || echo 0)
+  if [ "$size" -lt 1000000000 ]; then
+    echo "Error: downloaded file is only $size bytes, not an ISO. Check UBUNTU_URL / UBUNTU_VERSION."
+    rm -f "$WORK_DIR/$ISO_NAME.part"
+    exit 1
+  fi
+  mv "$WORK_DIR/$ISO_NAME.part" "$WORK_DIR/$ISO_NAME"
 
   echo "Download complete: $WORK_DIR/$ISO_NAME"
 }
@@ -79,6 +117,13 @@ build_docker_image() {
 
 build_iso() {
   check_docker
+  # Input ISO + output ISO + Docker scratch for extract/repack: budget 3x the ISO size,
+  # minus the input ISO if it is already on disk.
+  local iso_bytes need_bytes
+  iso_bytes=$(iso_size_bytes)
+  need_bytes=$(( iso_bytes * 3 ))
+  [ -f "$WORK_DIR/$ISO_NAME" ] && need_bytes=$(( iso_bytes * 2 ))
+  check_disk_space "$need_bytes" "building the custom ISO"
   download_iso
   build_docker_image
 
@@ -252,6 +297,7 @@ clean() {
   rm -rf "$WORK_DIR/squashfs"
   rm -f "$WORK_DIR/output.iso"
   rm -f "$SCRIPT_DIR/$OUTPUT_ISO"
+  rm -f "$SCRIPT_DIR"/ubuntu-*-e6540.iso   # output name before the -tv rename
   docker rmi "$DOCKER_IMAGE" 2>/dev/null || true
   echo "Clean complete (ISO preserved at $WORK_DIR/$ISO_NAME if present)"
 }
