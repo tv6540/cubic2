@@ -8,6 +8,10 @@ UBUNTU_URL="https://releases.ubuntu.com/${UBUNTU_VERSION}/ubuntu-${UBUNTU_VERSIO
 ISO_NAME="ubuntu-${UBUNTU_VERSION}-desktop-amd64.iso"
 OUTPUT_ISO="ubuntu-${UBUNTU_VERSION}-tv.iso"
 DOCKER_IMAGE="cubic2-builder"
+# Rescuezilla: GUI disk imaging (Clonezilla-compatible). The "noble" build is the 24.04 base.
+RESCUEZILLA_VERSION="${RESCUEZILLA_VERSION:-2.6.2}"
+RESCUEZILLA_NAME="rescuezilla-${RESCUEZILLA_VERSION}-64bit.noble.iso"
+RESCUEZILLA_URL="https://github.com/rescuezilla/rescuezilla/releases/download/${RESCUEZILLA_VERSION}/${RESCUEZILLA_NAME}"
 
 print_usage() {
   echo "Usage: $0 [command]"
@@ -19,9 +23,11 @@ print_usage() {
   echo "  clean     Remove work directory and Docker image"
   echo "  usb       Write ISO to USB (interactive device selection)"
   echo "  usb-stock Write the unmodified Ubuntu installer to USB (for installing to disk)"
+  echo "  usb-rescuezilla  Write Rescuezilla (GUI backup/restore imaging) to a second USB"
   echo ""
   echo "Environment variables:"
   echo "  UBUNTU_VERSION  Ubuntu version to download (default: 24.04.4)"
+  echo "  RESCUEZILLA_VERSION  Rescuezilla version for usb-rescuezilla (default: 2.6.2)"
   echo ""
   echo "Examples:"
   echo "  $0                    # Clean, build, and write to USB"
@@ -108,6 +114,27 @@ download_iso() {
   mv "$WORK_DIR/$ISO_NAME.part" "$WORK_DIR/$ISO_NAME"
 
   echo "Download complete: $WORK_DIR/$ISO_NAME"
+}
+
+download_rescuezilla() {
+  mkdir -p "$WORK_DIR"
+  if [ -f "$WORK_DIR/$RESCUEZILLA_NAME" ]; then
+    echo "Rescuezilla ISO already exists: $WORK_DIR/$RESCUEZILLA_NAME"
+    return 0
+  fi
+  echo "Downloading Rescuezilla $RESCUEZILLA_VERSION..."
+  echo "URL: $RESCUEZILLA_URL"
+  check_disk_space $(( 2 * 1024 * 1024 * 1024 )) "downloading Rescuezilla (~1.5 GB)"
+  curl -fL -o "$WORK_DIR/$RESCUEZILLA_NAME.part" "$RESCUEZILLA_URL"
+  local size
+  size=$(stat -f%z "$WORK_DIR/$RESCUEZILLA_NAME.part" 2>/dev/null || stat -c%s "$WORK_DIR/$RESCUEZILLA_NAME.part" 2>/dev/null || echo 0)
+  if [ "$size" -lt 500000000 ]; then
+    echo "Error: downloaded file is only $size bytes, not an ISO. Check RESCUEZILLA_VERSION."
+    rm -f "$WORK_DIR/$RESCUEZILLA_NAME.part"
+    exit 1
+  fi
+  mv "$WORK_DIR/$RESCUEZILLA_NAME.part" "$WORK_DIR/$RESCUEZILLA_NAME"
+  echo "Download complete: $WORK_DIR/$RESCUEZILLA_NAME"
 }
 
 build_docker_image() {
@@ -371,6 +398,12 @@ case "${1:-all}" in
     # (the customised ISO has the installer removed). See README "Installing to disk".
     download_iso
     write_usb "$2" "" "$WORK_DIR/$ISO_NAME"
+    ;;
+  usb-rescuezilla)
+    # Second stick: Rescuezilla for taking/restoring a factory image of the installed
+    # system. See README "Factory restore image".
+    download_rescuezilla
+    write_usb "$2" "" "$WORK_DIR/$RESCUEZILLA_NAME"
     ;;
   clean)
     clean

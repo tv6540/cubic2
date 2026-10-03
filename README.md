@@ -98,33 +98,43 @@ overlayroot so a reboot is still a full reset.
    ~/cubic2/scripts/setup-t450-disk --freeze && sudo reboot
    ```
 
+In the installer pick **Default selection** (not Extended): it leaves out LibreOffice,
+Thunderbird and the games, and the setup script removes the Firefox snap too.
+
 Day to day: anything goes wrong, reboot. To change something on a frozen system
 (update Chrome, add a package) run `sudo overlayroot-chroot`, make the change,
 `exit`, reboot. To make it writable again: `~/cubic2/scripts/setup-t450-disk --unfreeze`.
 If it ever fails to boot, hold Shift at GRUB, press `e` on the Ubuntu entry, add
 `overlayroot=disabled` to the `linux` line and press F10.
 
-## Supported Devices
+### Factory restore image (Rescuezilla)
 
-Device detection reads `/sys/class/dmi/id/{product_name,product_version,product_family}`.
-Dell reports the model in `product_name`; Lenovo reports a machine-type code there
-(e.g. `20BUS61X00`) and the model in `product_version`.
+Two layers of reset, for different situations:
 
-| Device | DMI match | Script |
-|--------|-----------|--------|
-| Dell Latitude E6540 | `Latitude E6540` | `setup-e6540` |
-| Dell OptiPlex 7050 | `OptiPlex 7050` | `setup-optiplex7050` |
-| Lenovo ThinkPad T450 / T450s | `ThinkPad T450` | `setup-t450` |
-| Anything else | – | `setup-e6540` (which re-runs detection and hands off) |
+| Situation | Tool | Time |
+|-----------|------|------|
+| Chrome misbehaving, something got changed, "just make it like yesterday" | overlayroot: **reboot** | seconds |
+| Drive replaced, baseline needs rebuilding, disk itself damaged | Rescuezilla image: **restore** | ~10 min |
 
-To add a device: add a case to `scripts/detect-device`, add a `scripts/setup-<name>`,
-and push. Existing USB sticks pick it up on next boot because the scripts are cloned
-from GitHub at runtime; no ISO rebuild is needed.
+overlayroot handles everyday resets on its own. The Rescuezilla image is insurance for
+the rare case where the disk contents themselves must be put back. Rescuezilla is the
+GUI version of Clonezilla and uses the same image format.
 
-## Use Case
+Prepare a **second** USB stick (any size over 2 GB):
+```sh
+./make.sh usb-rescuezilla
+```
 
-Perfect for a "TV box" setup where:
-- Laptop is connected to a TV via HDMI
-- Lid stays closed
-- If system becomes unstable, just reboot for a fresh start
-- Sign into Chrome once to sync everything
+Take the image once, right after `--freeze` and a successful reboot:
+
+1. Boot the T450 from the Rescuezilla stick (it starts straight into the GUI).
+2. **Backup**. Source: the internal drive. Destination: your NAS over the network
+   (choose *Connect to a network share*, enter the SMB path and credentials), or a
+   second data stick. Name it e.g. `t450-factory`. A fresh install compresses to a
+   few GB.
+
+Restore: boot the same stick, **Restore**, pick the `t450-factory` image from the
+same location, target = internal drive, confirm. Reboot.
+
+Images are kept off the stick on purpose: the stick is just the tool, the NAS holds
+the image, and either can be replaced without losing the other.
